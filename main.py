@@ -10,7 +10,7 @@ from concurrent.futures import ProcessPoolExecutor
 
 
 class RTSPCamera:
-    def __init__(self, src, name="Camera", calib_file=None):
+    def __init__(self, src, name="Camera", calib_file=None, homography_file=None, use_perspective=True):
         self.src = src
         self.name = name
         self.cap = cv2.VideoCapture(self.src)
@@ -29,11 +29,25 @@ class RTSPCamera:
                 dist = np.array(data["dist_coeffs"])
                 w = data["image_width_px"]
                 h = data["image_height_px"]
-                new_mtx, roi = cv2.getOptimalNewCameraMatrix(mtx, dist, (w, h), 1, (w, h))
+                new_mtx, roi = cv2.getOptimalNewCameraMatrix(mtx, dist, (w, h), 0, (w, h))
                 self.mapx, self.mapy = cv2.initUndistortRectifyMap(mtx, dist, None, new_mtx, (w, h), cv2.CV_32FC1)
         else:
             if calib_file:
                 print(f"[{self.name}] Warning: Calibration file {calib_file} not found. Skipping undistort.")
+
+        # Homography (perspective correction)
+        self.homography = None
+        self.homography_size = None
+        self.scale_px_per_mm = None
+        if use_perspective and homography_file and os.path.exists(homography_file):
+            print(f"[{self.name}] Loading homography from {homography_file}")
+            with open(homography_file, 'r') as f:
+                hdata = json.load(f)
+                self.homography = np.array(hdata["homography"], dtype=np.float64)
+                self.homography_size = (hdata["out_width"], hdata["out_height"])
+                self.scale_px_per_mm = hdata.get("scale_px_per_mm", None)
+        elif use_perspective and homography_file:
+            print(f"[{self.name}] Warning: Homography file {homography_file} not found. Skipping perspective.")
 
         self.thread = threading.Thread(target=self.update, args=())
         self.thread.daemon = True
@@ -47,6 +61,8 @@ class RTSPCamera:
                 if ret:
                     if self.mapx is not None and self.mapy is not None:
                         frame = cv2.remap(frame, self.mapx, self.mapy, cv2.INTER_LINEAR)
+                    if self.homography is not None:
+                        frame = cv2.warpPerspective(frame, self.homography, self.homography_size)
                     with self.lock:
                         self.ret = ret
                         self.frame = frame
@@ -293,14 +309,27 @@ def main():
     parser.add_argument('--max-deviation', type=float, default=50.0,
                         help='Max allowed pixel deviation from median before a reading is rejected as outlier (default: 50)')
 
+    # Perspective
+    parser.add_argument('--no-perspective', action='store_true',
+                        help='Disable perspective (homography) correction')
+
     args = parser.parse_args()
 
     # ── Initialize cameras ──────────────────────────────────────────────────
+    use_persp = not args.no_perspective
+    print(f"Perspective correction: {'ON' if use_persp else 'OFF'}")
+
     print(f"Initializing Left Camera: {args.left_src}")
-    left_cam = RTSPCamera(args.left_src, "LeftCam", calib_file="calibration_data/left_calib.json")
+    left_cam = RTSPCamera(args.left_src, "LeftCam",
+                          calib_file="calibration_data/left_calib.json",
+                          homography_file="calibration_data/left_homography.json",
+                          use_perspective=use_persp)
 
     print(f"Initializing Right Camera: {args.right_src}")
-    right_cam = RTSPCamera(args.right_src, "RightCam", calib_file="calibration_data/right_calib.json")
+    right_cam = RTSPCamera(args.right_src, "RightCam",
+                           calib_file="calibration_data/right_calib.json",
+                           homography_file="calibration_data/right_homography.json",
+                           use_perspective=use_persp)
 
     time.sleep(2)
     print("Cameras initialized.")
@@ -342,7 +371,15 @@ def main():
     calibration_samples = []
     CALIBRATION_FRAMES = 60  # collect 60 frames for initial calibration
 
-    if args.cloth_width_mm is not None:
+    # If homography provides a known scale, use it directly
+    if use_persp and left_cam.scale_px_per_mm and left_cam.scale_px_per_mm > 0:
+        mm_per_px = 1.0 / left_cam.scale_px_per_mm
+        calibration_done = True
+        print(f"\n=== SCALE FROM HOMOGRAPHY ===")
+        print(f"mm/px = {mm_per_px:.4f} (derived from perspective calibration)")
+        print(f"NOTE: Use --cloth-width-mm to override with runtime calibration\n")
+
+    if not calibration_done and args.cloth_width_mm is not None:
         print(f"\n=== CALIBRATION MODE ===")
         print(f"Cloth width: {args.cloth_width_mm:.1f} mm")
         print(f"Collecting {CALIBRATION_FRAMES} frames to compute mm/px ratio...")

@@ -95,6 +95,52 @@ class CameraReader:
 
 # ── Capture Mode ─────────────────────────────────────────────────────────────
 
+def draw_coverage_heatmap(display, coverage_grid, grid_rows=3, grid_cols=3):
+    """Draw a semi-transparent 3x3 coverage heatmap overlay on the display frame."""
+    h, w = display.shape[:2]
+    cell_h = h // grid_rows
+    cell_w = w // grid_cols
+    overlay = display.copy()
+
+    for r in range(grid_rows):
+        for c in range(grid_cols):
+            count = coverage_grid[r][c]
+            x1, y1 = c * cell_w, r * cell_h
+            x2, y2 = (c + 1) * cell_w, (r + 1) * cell_h
+
+            if count >= 2:
+                color = (0, 180, 0)     # green = good coverage
+            elif count == 1:
+                color = (0, 200, 255)   # yellow = needs more
+            else:
+                color = (0, 0, 200)     # red = no coverage
+
+            cv2.rectangle(overlay, (x1, y1), (x2, y2), color, -1)
+            cv2.putText(overlay, str(count), (x1 + cell_w // 2 - 10, y1 + cell_h // 2 + 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+
+    cv2.addWeighted(overlay, 0.25, display, 0.75, 0, display)
+
+    # Draw grid lines
+    for r in range(1, grid_rows):
+        cv2.line(display, (0, r * cell_h), (w, r * cell_h), (255, 255, 255), 1)
+    for c in range(1, grid_cols):
+        cv2.line(display, (c * cell_w, 0), (c * cell_w, h), (255, 255, 255), 1)
+
+
+def get_checkerboard_zone(corners, frame_shape, grid_rows=3, grid_cols=3):
+    """Determine which 3x3 grid zone(s) a detected checkerboard falls into."""
+    h, w = frame_shape[:2]
+    cell_h = h // grid_rows
+    cell_w = w // grid_cols
+    # Use center of the chessboard corners
+    cx = np.mean(corners[:, 0, 0])
+    cy = np.mean(corners[:, 0, 1])
+    col = min(int(cx // cell_w), grid_cols - 1)
+    row = min(int(cy // cell_h), grid_rows - 1)
+    return row, col
+
+
 def run_capture(args):
     board_size = (args.cols, args.rows)
     cameras = []
@@ -109,6 +155,8 @@ def run_capture(args):
 
         log.info("=== Capturing %s camera (src=%s) ===", cam_name.upper(), src)
         log.info("Press SPACE to capture when chessboard is detected. Press Q when done.")
+        log.info("Coverage heatmap: GREEN=good (2+), YELLOW=needs more (1), RED=no coverage (0)")
+        log.info("TIP: Move the checkerboard to RED/YELLOW zones for best calibration!")
 
         reader = CameraReader(src, cam_name)
         time.sleep(2)
@@ -117,6 +165,8 @@ def run_capture(args):
         cv2.namedWindow(win, cv2.WINDOW_NORMAL)
 
         saved = 0
+        coverage_grid = [[0]*3 for _ in range(3)]  # 3x3 coverage tracker
+
         while saved < args.num_frames:
             ret, frame = reader.read()
             if not ret or frame is None:
@@ -126,16 +176,28 @@ def run_capture(args):
             found, corners = find_chessboard(frame, board_size)
             display = frame.copy()
 
+            # Draw coverage heatmap
+            draw_coverage_heatmap(display, coverage_grid)
+
             if found:
                 cv2.drawChessboardCorners(display, board_size, corners, found)
-                label = f"[{saved}/{args.num_frames}] FOUND - press SPACE to save"
+                row, col = get_checkerboard_zone(corners, frame.shape)
+                zone_count = coverage_grid[row][col]
+                zone_status = "GOOD" if zone_count >= 2 else ("OK" if zone_count >= 1 else "NEEDED!")
+                label = f"[{saved}/{args.num_frames}] FOUND (zone {row},{col}: {zone_status}) - SPACE to save"
                 color = (0, 220, 0)
             else:
                 label = "Chessboard NOT detected"
                 color = (0, 0, 220)
 
             cv2.putText(display, label, (10, 36),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+
+            # Show total coverage status
+            total_covered = sum(1 for r in coverage_grid for c in r if c >= 2)
+            cv2.putText(display, f"Coverage: {total_covered}/9 zones ready", (10, 65),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
             cv2.imshow(win, display)
 
             key = cv2.waitKey(30) & 0xFF
@@ -145,10 +207,19 @@ def run_capture(args):
                 fname = os.path.join(save_dir, f"{cam_name}_{saved:03d}.png")
                 cv2.imwrite(fname, frame)
                 saved += 1
-                log.info("[%s] Saved %d/%d -> %s", cam_name, saved, args.num_frames, fname)
+                # Update coverage grid
+                row, col = get_checkerboard_zone(corners, frame.shape)
+                coverage_grid[row][col] += 1
+                log.info("[%s] Saved %d/%d -> %s (zone %d,%d)", cam_name, saved, args.num_frames, fname, row, col)
 
         reader.release()
         cv2.destroyAllWindows()
+
+        total_covered = sum(1 for r in coverage_grid for c in r if c >= 2)
+        if total_covered < 5:
+            log.warning("[%s] Only %d/9 zones have good coverage. Consider recapturing with better spread!", cam_name, total_covered)
+        else:
+            log.info("[%s] Good coverage: %d/9 zones.", cam_name, total_covered)
         log.info("[%s] Capture complete: %d frames saved to '%s'", cam_name, saved, save_dir)
 
     log.info("Run `python calibrate.py calibrate` next.")
@@ -207,10 +278,25 @@ def run_calibrate(args):
             log.error("[%s] Only %d usable images, need at least 5.", cam_name, len(obj_points))
             continue
 
-        log.info("[%s] Running calibrateCamera() on %d frames...", cam_name, len(obj_points))
+        log.info("[%s] Running calibrateCamera() on %d frames (with CALIB_FIX_K3)...", cam_name, len(obj_points))
+        calib_flags = cv2.CALIB_FIX_K3  # Prevent overfitting of k3
         rms, camera_matrix, dist_coeffs, rvecs, tvecs = cv2.calibrateCamera(
-            obj_points, img_points, img_size, None, None)
-        log.info("[%s] RMS: %.4f px", cam_name, rms)
+            obj_points, img_points, img_size, None, None, flags=calib_flags)
+        log.info("[%s] Overall RMS: %.4f px", cam_name, rms)
+
+        # Per-image reprojection error
+        log.info("[%s] Per-image reprojection errors:", cam_name)
+        per_image_errors = []
+        for i in range(len(obj_points)):
+            img_pts_proj, _ = cv2.projectPoints(obj_points[i], rvecs[i], tvecs[i], camera_matrix, dist_coeffs)
+            err = cv2.norm(img_points[i], img_pts_proj, cv2.NORM_L2) / len(img_pts_proj)
+            per_image_errors.append(round(err, 4))
+            status = "OK" if err < 1.0 else "HIGH"
+            log.info("  Image %d: %.4f px [%s]", i, err, status)
+
+        high_error_count = sum(1 for e in per_image_errors if e >= 1.0)
+        if high_error_count > 0:
+            log.warning("[%s] %d images have high reprojection error (>1.0 px). Consider re-capturing those.", cam_name, high_error_count)
 
         # Save calibration
         data = {
@@ -219,12 +305,81 @@ def run_calibrate(args):
             "image_width_px": img_size[0],
             "image_height_px": img_size[1],
             "rms": round(rms, 6),
+            "per_image_rms": per_image_errors,
+            "calib_flags": "CALIB_FIX_K3",
         }
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
         log.info("[%s] Calibration saved -> %s", cam_name, out_path)
+        log.info("[%s] dist_coeffs: k1=%.4f, k2=%.4f, p1=%.4f, p2=%.4f, k3=%.4f (fixed=0)",
+                 cam_name, *dist_coeffs.flatten()[:5])
 
     log.info("Calibration complete. Files saved in '%s/'.", CALIB_DIR)
+
+
+# ── Test Intrinsic Calibration ───────────────────────────────────────────────
+
+def run_test(args):
+    """
+    Shows live feed from cameras: Original vs Undistorted side-by-side.
+    Allows user to visually verify if the calibration is working perfectly.
+    """
+    cameras = []
+    if args.camera in ("left", "both"):
+        cameras.append(("left", args.left_src, os.path.join(CALIB_DIR, "left_calib.json")))
+    if args.camera in ("right", "both"):
+        cameras.append(("right", args.right_src, os.path.join(CALIB_DIR, "right_calib.json")))
+
+    for cam_name, src, calib_path in cameras:
+        log.info("=== Testing Intrinsic Calibration for %s camera ===", cam_name.upper())
+
+        mapx, mapy = None, None
+        w, h = 0, 0
+        if os.path.exists(calib_path):
+            with open(calib_path, 'r') as f:
+                data = json.load(f)
+                mtx = np.array(data["camera_matrix"])
+                dist = np.array(data["dist_coeffs"])
+                w = data.get("image_width_px", 1280)
+                h = data.get("image_height_px", 720)
+                new_mtx, roi = cv2.getOptimalNewCameraMatrix(mtx, dist, (w, h), 0, (w, h))
+                mapx, mapy = cv2.initUndistortRectifyMap(mtx, dist, None, new_mtx, (w, h), cv2.CV_32FC1)
+        else:
+            log.warning("Lens calibration not found at %s. Please run calibrate first.", calib_path)
+            continue
+
+        reader = CameraReader(src, cam_name)
+        time.sleep(1.5)
+        
+        win = f"Test Calibration - {cam_name.upper()} (Left: Original, Right: Undistorted)"
+        cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+        log.info("Press 'q' or ESC to proceed or close.")
+
+        while True:
+            ret, frame = reader.read()
+            if not ret or frame is None:
+                time.sleep(0.01)
+                continue
+                
+            undistorted = cv2.remap(frame, mapx, mapy, cv2.INTER_LINEAR)
+            
+            # Put both side by side
+            vis = np.concatenate((frame, undistorted), axis=1)
+            
+            # Show a grid of lines to help see straightness
+            h_v, w_v = vis.shape[:2]
+            for grid_y in range(0, h_v, h_v // 10):
+                cv2.line(vis, (0, grid_y), (w_v, grid_y), (0, 0, 255), 1)
+            for grid_x in range(0, w_v, w_v // 20):
+                cv2.line(vis, (grid_x, 0), (grid_x, h_v), (0, 0, 255), 1)
+
+            cv2.imshow(win, vis)
+            k = cv2.waitKey(20) & 0xFF
+            if k == 27 or k == ord('q'):
+                break
+                
+        reader.release()
+        cv2.destroyAllWindows()
 
 
 # ── Perspective Mode ─────────────────────────────────────────────────────────
@@ -253,7 +408,7 @@ def run_perspective(args):
                 dist = np.array(data["dist_coeffs"])
                 w = data.get("image_width_px", 1280)
                 h = data.get("image_height_px", 720)
-                new_mtx, roi = cv2.getOptimalNewCameraMatrix(mtx, dist, (w, h), 1, (w, h))
+                new_mtx, roi = cv2.getOptimalNewCameraMatrix(mtx, dist, (w, h), 0, (w, h))
                 mapx, mapy = cv2.initUndistortRectifyMap(mtx, dist, None, new_mtx, (w, h), cv2.CV_32FC1)
         else:
             log.warning("Lens calibration not found at %s. Please run calibrate first.", calib_path)
@@ -385,6 +540,9 @@ def main():
     persp_p.add_argument('--rect-height-mm', type=float, default=200.0, help='Physical height of the calibration rectangle in mm')
     persp_p.add_argument('--px-per-mm', type=float, default=1.0, help='Scaling factor in the output top-down image')
 
+    test_p = sub.add_parser("test", parents=[shared],
+                            help="Test intrinsic calibration by viewing side-by-side original and undistorted streams")
+
     args = p.parse_args()
     if args.mode == "capture":
         run_capture(args)
@@ -392,6 +550,8 @@ def main():
         run_calibrate(args)
     elif args.mode == "perspective":
         run_perspective(args)
+    elif args.mode == "test":
+        run_test(args)
 
 
 if __name__ == "__main__":
