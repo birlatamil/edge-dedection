@@ -11,6 +11,35 @@ import json
 from collections import deque
 from concurrent.futures import ProcessPoolExecutor
 
+STITCH_OFFSET_FILE = "calibration_data/stitch_offset.json"
+
+
+def load_stitch_offset():
+    """Load the previously saved stitch calibration offset from disk."""
+    if os.path.exists(STITCH_OFFSET_FILE):
+        with open(STITCH_OFFSET_FILE, 'r') as f:
+            data = json.load(f)
+            offset = data.get("stitch_offset", None)
+            cloth_mm = data.get("calibrated_cloth_width_mm", None)
+            if offset is not None:
+                print(f"[Stitch] Loaded offset = {offset:.2f} px (calibrated with {cloth_mm} mm cloth)")
+                return offset
+    return None
+
+
+def save_stitch_offset(offset, cloth_width_mm, left_edge, right_edge):
+    """Save the stitch calibration offset to disk for persistence."""
+    os.makedirs(os.path.dirname(STITCH_OFFSET_FILE), exist_ok=True)
+    data = {
+        "stitch_offset": offset,
+        "calibrated_cloth_width_mm": cloth_width_mm,
+        "left_edge_at_calibration": left_edge,
+        "right_edge_at_calibration": right_edge,
+    }
+    with open(STITCH_OFFSET_FILE, 'w') as f:
+        json.dump(data, f, indent=2)
+    print(f"[Stitch] Saved offset = {offset:.2f} px to {STITCH_OFFSET_FILE}")
+
 
 class RTSPCamera:
     def __init__(self, src, name="Camera", calib_file=None, homography_file=None, use_perspective=True):
@@ -395,7 +424,15 @@ def main():
     else:
         calibration_done = True  # no calibration needed, output in px only
 
+    # ── Stitch calibration ──────────────────────────────────────────────────
+    stitch_offset = load_stitch_offset()
+    stitch_calibrated = stitch_offset is not None
+    # Track current edges for stitch calibration trigger
+    current_left_edge = 0.0
+    current_right_edge = 0.0
+
     print("Press 'q' to quit. Press 'c' to clear custom guide lines.")
+    print("Press 's' to calibrate stitch offset (requires --cloth-width-mm).")
     print("Left-click on video to add a custom guide, Right-click to remove last guide.")
     cv2.namedWindow("Edge Detection - Left", cv2.WINDOW_NORMAL)
     cv2.setMouseCallback("Edge Detection - Left", mouse_callback, 'left')
@@ -424,14 +461,23 @@ def main():
                 left_edge_x = future_left.result()
                 right_edge_x = future_right.result()
 
+                # Save current edges for stitch calibration
+                current_left_edge = left_edge_x
+                current_right_edge = right_edge_x
+
                 width_right_frame = frame_r.shape[1]
 
-                # Width calculation
-                if mm_per_px and mm_per_px > 1e-6:
-                    overlap_px = int(round(args.guide_overlap_mm / mm_per_px))
+                # Width calculation using stitch offset
+                if stitch_calibrated and stitch_offset is not None:
+                    # Stitched formula: total = (right_edge + offset) - left_edge
+                    raw_width_px = (right_edge_x + stitch_offset) - left_edge_x
                 else:
-                    overlap_px = 144
-                raw_width_px = left_edge_x + (width_right_frame - right_edge_x) - overlap_px
+                    # Fallback: old formula (inaccurate after homography)
+                    if mm_per_px and mm_per_px > 1e-6:
+                        overlap_px = int(round(args.guide_overlap_mm / mm_per_px))
+                    else:
+                        overlap_px = 144
+                    raw_width_px = left_edge_x + (width_right_frame - right_edge_x) - overlap_px
 
                 # Stabilise the width (smooth + reject outliers)
                 stable_width_px = width_filter.update(raw_width_px)
@@ -465,6 +511,13 @@ def main():
                 cv2.line(disp_l, (edge_x_int_l, 0), (edge_x_int_l, disp_l.shape[0]), (0, 0, 255), 3)
                 cv2.putText(disp_l, f"Left Edge X: {left_edge_x:.1f} px", (30, 50),
                             cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                # Stitch status on left frame
+                if stitch_calibrated:
+                    cv2.putText(disp_l, f"STITCH: calibrated (offset={stitch_offset:.1f})",
+                                (30, disp_l.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 0), 2)
+                else:
+                    cv2.putText(disp_l, "STITCH: NOT calibrated - press 's'",
+                                (30, disp_l.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                 if left_aoi:
                     ax, ay, aw, ah = left_aoi
                     cv2.rectangle(disp_l, (ax, ay), (ax + aw, ay + ah), (255, 255, 0), 2)
@@ -504,6 +557,21 @@ def main():
             elif key == ord('c'):
                 custom_guides['left'].clear()
                 custom_guides['right'].clear()
+            elif key == ord('s'):
+                # Stitch calibration: compute offset from known cloth width
+                if args.cloth_width_mm is not None and args.cloth_width_mm > 0:
+                    # offset = known_width + left_edge - right_edge
+                    stitch_offset = args.cloth_width_mm + current_left_edge - current_right_edge
+                    stitch_calibrated = True
+                    save_stitch_offset(stitch_offset, args.cloth_width_mm,
+                                       current_left_edge, current_right_edge)
+                    print(f"\n=== STITCH CALIBRATION DONE ===")
+                    print(f"Cloth width: {args.cloth_width_mm:.1f} mm")
+                    print(f"Left edge: {current_left_edge:.1f} px, Right edge: {current_right_edge:.1f} px")
+                    print(f"Offset: {stitch_offset:.2f} px\n")
+                else:
+                    print("\n[Stitch] ERROR: --cloth-width-mm is required for stitch calibration!")
+                    print("Restart with: python main.py ... --cloth-width-mm <actual_width_in_mm>\n")
 
     finally:
         print("\nShutting down...")
