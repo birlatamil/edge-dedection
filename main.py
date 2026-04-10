@@ -1,10 +1,13 @@
+import os
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+
 import cv2
 import numpy as np
 import argparse
 import threading
 import time
 import json
-import os
+
 from collections import deque
 from concurrent.futures import ProcessPoolExecutor
 
@@ -13,7 +16,8 @@ class RTSPCamera:
     def __init__(self, src, name="Camera", calib_file=None, homography_file=None, use_perspective=True):
         self.src = src
         self.name = name
-        self.cap = cv2.VideoCapture(self.src)
+        self.cap = cv2.VideoCapture(self.src, cv2.CAP_FFMPEG)
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
         self.ret, self.frame = self.cap.read()
         self.running = True
         self.lock = threading.Lock()
@@ -59,24 +63,28 @@ class RTSPCamera:
             if self.cap.isOpened():
                 ret, frame = self.cap.read()
                 if ret:
-                    if self.mapx is not None and self.mapy is not None:
-                        frame = cv2.remap(frame, self.mapx, self.mapy, cv2.INTER_LINEAR)
-                    if self.homography is not None:
-                        frame = cv2.warpPerspective(frame, self.homography, self.homography_size)
                     with self.lock:
                         self.ret = ret
                         self.frame = frame
                 else:
                     print(f"[{self.name}] Connection lost. Reconnecting...")
                     time.sleep(1.0)
-                    self.cap.open(self.src)
+                    self.cap.open(self.src, cv2.CAP_FFMPEG)
             else:
                 time.sleep(1.0)
-                self.cap.open(self.src)
+                self.cap.open(self.src, cv2.CAP_FFMPEG)
 
     def read(self):
         with self.lock:
-            return self.ret, self.frame.copy() if self.frame is not None else (self.ret, None)
+            ret, frame = self.ret, self.frame.copy() if self.frame is not None else None
+            
+        if ret and frame is not None:
+            if self.mapx is not None and self.mapy is not None:
+                frame = cv2.remap(frame, self.mapx, self.mapy, cv2.INTER_LINEAR)
+            if self.homography is not None:
+                frame = cv2.warpPerspective(frame, self.homography, self.homography_size)
+        
+        return ret, frame
 
     def release(self):
         self.running = False
