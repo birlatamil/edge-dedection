@@ -8,6 +8,7 @@ import threading
 import time
 import json
 
+from scipy.signal import find_peaks
 from collections import deque
 from concurrent.futures import ProcessPoolExecutor
 
@@ -149,37 +150,11 @@ def crop_to_aoi(frame, aoi):
     return frame[y:y+h, x:x+w]
 
 
-# ─── Edge Detection (Canny-based) ──────────────────────────────────────────────
+# ─── Edge Detection (Sobel-X Gradient Projection) ─────────────────────────────
 
-def find_fabric_edge_canny(frame, canny_low=50, canny_high=150):
-    """
-    Finds the dominant vertical edge in the frame using Canny edge detection
-    with vertical projection and sub-pixel refinement.
-
-    Returns the x-coordinate (float) of the strongest vertical edge.
-    """
-    if frame is None:
-        return 0.0
-
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-
-    # Canny edge detection with hysteresis thresholding
-    edges = cv2.Canny(blurred, canny_low, canny_high)
-
-    # Project (sum) along the vertical axis – each column gets a score
-    projection = np.sum(edges.astype(np.float64), axis=0)
-
-    # Ignore border margins to avoid false positives
-    margin = 20
-    projection[:margin] = 0
-    projection[-margin:] = 0
-
-    # Find the column with the strongest vertical edge signal
-    peak_idx = int(np.argmax(projection))
-
-    # Sub-pixel refinement: fit a parabola around the peak
-    if margin < peak_idx < len(projection) - margin:
+def _subpixel_refine(projection, peak_idx):
+    """Refine a peak index to sub-pixel accuracy using parabola fitting."""
+    if 1 <= peak_idx <= len(projection) - 2:
         y_left = projection[peak_idx - 1]
         y_center = projection[peak_idx]
         y_right = projection[peak_idx + 1]
@@ -187,8 +162,90 @@ def find_fabric_edge_canny(frame, canny_low=50, canny_high=150):
         if abs(denom) > 1e-6:
             offset = (y_left - y_right) / denom
             return peak_idx + offset
-
     return float(peak_idx)
+
+
+def find_fabric_edges_sobel(frame, min_prominence_ratio=5.0, min_peak_distance=50,
+                            gaussian_sigma=15):
+    """
+    Finds fabric edges using Sobel-X gradient projection.
+
+    Positive horizontal gradients (dark→light) indicate LEFT edges of the cloth.
+    Negative horizontal gradients (light→dark) indicate RIGHT edges.
+
+    Uses prominence-based adaptive thresholding: a peak is only accepted if
+    its value is > min_prominence_ratio × median(projection).
+
+    Returns:
+        dict with keys:
+            'left_edges'  : list of float x-coordinates (positive-gradient edges)
+            'right_edges' : list of float x-coordinates (negative-gradient edges)
+        OR None if no cloth is detected in either direction.
+    """
+    if frame is None:
+        return None
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+
+    # Sobel-X: horizontal gradient (float64 to preserve sign)
+    sobel_x = cv2.Sobel(blurred, cv2.CV_64F, 1, 0, ksize=5)
+
+    # Split into positive (left/rising edges) and negative (right/falling edges)
+    pos_gradient = np.clip(sobel_x, 0, None)   # dark → light transitions
+    neg_gradient = np.clip(-sobel_x, 0, None)   # light → dark transitions
+
+    # Vertical projection: sum each column
+    pos_proj = np.sum(pos_gradient, axis=0)
+    neg_proj = np.sum(neg_gradient, axis=0)
+
+    # Smooth projections with Gaussian kernel to suppress texture noise
+    ksize = int(gaussian_sigma * 6) | 1  # ensure odd
+    pos_proj = cv2.GaussianBlur(pos_proj.reshape(1, -1), (ksize, 1), gaussian_sigma).flatten()
+    neg_proj = cv2.GaussianBlur(neg_proj.reshape(1, -1), (ksize, 1), gaussian_sigma).flatten()
+
+    # Zero out border margins to avoid false positives from frame edges
+    margin = 20
+    pos_proj[:margin] = 0
+    pos_proj[-margin:] = 0
+    neg_proj[:margin] = 0
+    neg_proj[-margin:] = 0
+
+    left_edges = []
+    right_edges = []
+
+    # --- Find LEFT edges (positive gradient peaks) ---
+    pos_median = np.median(pos_proj[pos_proj > 0]) if np.any(pos_proj > 0) else 1.0
+    pos_threshold = pos_median * min_prominence_ratio
+    pos_peaks, pos_props = find_peaks(pos_proj, distance=min_peak_distance,
+                                       prominence=pos_threshold)
+    # Sort by prominence (strongest first), keep top 2
+    if len(pos_peaks) > 0:
+        order = np.argsort(pos_props['prominences'])[::-1]
+        for idx in order[:2]:
+            pk = pos_peaks[idx]
+            refined = _subpixel_refine(pos_proj, pk)
+            left_edges.append(refined)
+        left_edges.sort()  # left-to-right order
+
+    # --- Find RIGHT edges (negative gradient peaks) ---
+    neg_median = np.median(neg_proj[neg_proj > 0]) if np.any(neg_proj > 0) else 1.0
+    neg_threshold = neg_median * min_prominence_ratio
+    neg_peaks, neg_props = find_peaks(neg_proj, distance=min_peak_distance,
+                                       prominence=neg_threshold)
+    if len(neg_peaks) > 0:
+        order = np.argsort(neg_props['prominences'])[::-1]
+        for idx in order[:2]:
+            pk = neg_peaks[idx]
+            refined = _subpixel_refine(neg_proj, pk)
+            right_edges.append(refined)
+        right_edges.sort()
+
+    # If absolutely no edges found in either direction → no cloth
+    if len(left_edges) == 0 and len(right_edges) == 0:
+        return None
+
+    return {'left_edges': left_edges, 'right_edges': right_edges}
 
 
 def draw_vertical_guide(frame, x, label, color=(0, 255, 255), thickness=2):
@@ -250,19 +307,25 @@ def mouse_callback(event, x, y, flags, param):
 def _process_frame(args):
     """
     Top-level function for multiprocessing.
-    Receives (frame, aoi_or_none, canny_low, canny_high) and returns edge_x
-    in the ORIGINAL frame coordinate system.
+    Receives (frame, aoi_or_none) and returns an edge dict
+    in the ORIGINAL frame coordinate system, or None if no cloth.
     """
-    frame, aoi, canny_low, canny_high = args
+    frame, aoi = args
     if frame is None:
-        return 0.0
+        return None
 
     if aoi is not None:
         cropped = crop_to_aoi(frame, aoi)
-        edge_x_local = find_fabric_edge_canny(cropped, canny_low, canny_high)
-        return aoi[0] + edge_x_local
+        result = find_fabric_edges_sobel(cropped)
+        if result is None:
+            return None
+        # Translate local AOI coordinates back to full-frame coordinates
+        ox = aoi[0]
+        result['left_edges'] = [e + ox for e in result['left_edges']]
+        result['right_edges'] = [e + ox for e in result['right_edges']]
+        return result
     else:
-        return find_fabric_edge_canny(frame, canny_low, canny_high)
+        return find_fabric_edges_sobel(frame)
 
 
 # ─── Stable Width Filter ──────────────────────────────────────────────────────
@@ -282,7 +345,10 @@ class StableWidthFilter:
         self.last_stable = 0.0
 
     def update(self, raw_width_px):
-        """Feed a new raw measurement. Returns the stabilised width."""
+        """Feed a new raw measurement. Returns the stabilised width, or None if input is None."""
+        if raw_width_px is None:
+            return None
+
         if len(self.window) >= 5:
             median = np.median(self.window)
             # Reject big jumps (outliers)
@@ -322,12 +388,6 @@ def main():
                         help='Manual AOI for left camera as "x,y,w,h"')
     parser.add_argument('--aoi-right', type=str, default=None,
                         help='Manual AOI for right camera as "x,y,w,h"')
-
-    # Canny thresholds
-    parser.add_argument('--canny-low', type=int, default=50,
-                        help='Canny lower threshold (default: 50)')
-    parser.add_argument('--canny-high', type=int, default=150,
-                        help='Canny upper threshold (default: 150)')
 
     # Multiprocessing
     parser.add_argument('--workers', type=int, default=2,
@@ -451,45 +511,71 @@ def main():
                 # Dispatch both frames for parallel edge detection
                 future_left = executor.submit(
                     _process_frame,
-                    (frame_l, left_aoi, args.canny_low, args.canny_high)
+                    (frame_l, left_aoi)
                 )
                 future_right = executor.submit(
                     _process_frame,
-                    (frame_r, right_aoi, args.canny_low, args.canny_high)
+                    (frame_r, right_aoi)
                 )
 
-                left_edge_x = future_left.result()
-                right_edge_x = future_right.result()
+                left_result = future_left.result()   # dict or None
+                right_result = future_right.result()  # dict or None
 
-                # Save current edges for stitch calibration
-                current_left_edge = left_edge_x
-                current_right_edge = right_edge_x
+                # Gather all detected edges per camera
+                left_all = []   # all edge x-coords found in left camera
+                right_all = []  # all edge x-coords found in right camera
+                if left_result is not None:
+                    left_all = sorted(left_result['left_edges'] + left_result['right_edges'])
+                if right_result is not None:
+                    right_all = sorted(right_result['left_edges'] + right_result['right_edges'])
 
-                width_right_frame = frame_r.shape[1]
+                left_has_cloth = len(left_all) > 0
+                right_has_cloth = len(right_all) > 0
 
-                # Width calculation using stitch offset
-                if stitch_calibrated and stitch_offset is not None:
-                    # Stitched formula: total = (right_edge + offset) - left_edge
-                    raw_width_px = (right_edge_x + stitch_offset) - left_edge_x
-                else:
-                    # Fallback: old formula (inaccurate after homography)
-                    if mm_per_px and mm_per_px > 1e-6:
-                        overlap_px = int(round(args.guide_overlap_mm / mm_per_px))
+                # ── Width Calculation (3 cases) ─────────────────────────────
+                raw_width_px = None
+
+                if left_has_cloth and right_has_cloth:
+                    # CASE 1: Cloth spans both cameras
+                    leftmost_edge = left_all[0]
+                    rightmost_edge = right_all[-1]
+
+                    # Save current edges for stitch calibration
+                    current_left_edge = leftmost_edge
+                    current_right_edge = rightmost_edge
+
+                    if stitch_calibrated and stitch_offset is not None:
+                        raw_width_px = (rightmost_edge + stitch_offset) - leftmost_edge
                     else:
-                        overlap_px = 144
-                    raw_width_px = left_edge_x + (width_right_frame - right_edge_x) - overlap_px
+                        width_right_frame = frame_r.shape[1]
+                        if mm_per_px and mm_per_px > 1e-6:
+                            overlap_px = int(round(args.guide_overlap_mm / mm_per_px))
+                        else:
+                            overlap_px = 144
+                        raw_width_px = leftmost_edge + (width_right_frame - rightmost_edge) - overlap_px
+
+                elif left_has_cloth and not right_has_cloth and len(left_all) >= 2:
+                    # CASE 2a: Cloth visible ONLY in left camera (2 edges)
+                    raw_width_px = abs(left_all[-1] - left_all[0])
+
+                elif right_has_cloth and not left_has_cloth and len(right_all) >= 2:
+                    # CASE 2b: Cloth visible ONLY in right camera (2 edges)
+                    raw_width_px = abs(right_all[-1] - right_all[0])
+
+                else:
+                    # CASE 3: No cloth detected / only 1 edge in 1 camera
+                    raw_width_px = None
 
                 # Stabilise the width (smooth + reject outliers)
                 stable_width_px = width_filter.update(raw_width_px)
 
                 # ── Calibration phase ───────────────────────────────────────
-                if not calibration_done:
+                if not calibration_done and stable_width_px is not None:
                     calibration_samples.append(stable_width_px)
                     remaining = CALIBRATION_FRAMES - len(calibration_samples)
                     if remaining > 0:
                         print(f"Calibrating... {remaining} frames remaining    ", end='\r')
                     else:
-                        # Compute mm/px from the average stable width during calibration
                         avg_cal_px = np.mean(calibration_samples)
                         mm_per_px = args.cloth_width_mm / avg_cal_px
                         calibration_done = True
@@ -498,7 +584,7 @@ def main():
                         print(f"Scale: {mm_per_px:.4f} mm/px\n")
 
                 # ── Compute mm width ────────────────────────────────────────
-                width_mm = stable_width_px * mm_per_px if mm_per_px is not None else None
+                width_mm = stable_width_px * mm_per_px if (mm_per_px is not None and stable_width_px is not None) else None
 
                 # ── Display Left Frame ──────────────────────────────────────
                 disp_l = frame_l.copy()
@@ -507,10 +593,35 @@ def main():
                 else:
                     for i, cx in enumerate(custom_guides['left']):
                         draw_vertical_guide(disp_l, cx, f"Custom L{i+1}", color=(255, 100, 255))
-                edge_x_int_l = int(round(left_edge_x))
-                cv2.line(disp_l, (edge_x_int_l, 0), (edge_x_int_l, disp_l.shape[0]), (0, 0, 255), 3)
-                cv2.putText(disp_l, f"Left Edge X: {left_edge_x:.1f} px", (30, 50),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+
+                # Draw detected edges on left frame
+                if left_result is not None:
+                    for i, ex in enumerate(left_result['left_edges']):
+                        ex_int = int(round(ex))
+                        cv2.line(disp_l, (ex_int, 0), (ex_int, disp_l.shape[0]), (0, 255, 0), 3)
+                        cv2.putText(disp_l, f"L-edge {i+1}: {ex:.1f}", (ex_int + 5, 80 + i * 30),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                    for i, ex in enumerate(left_result['right_edges']):
+                        ex_int = int(round(ex))
+                        cv2.line(disp_l, (ex_int, 0), (ex_int, disp_l.shape[0]), (255, 100, 0), 3)
+                        cv2.putText(disp_l, f"R-edge {i+1}: {ex:.1f}", (ex_int + 5, 80 + (len(left_result['left_edges']) + i) * 30),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 100, 0), 2)
+                else:
+                    cv2.putText(disp_l, "NO CLOTH", (30, 80),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
+
+                # Width info on left frame
+                if stable_width_px is not None:
+                    if width_mm is not None:
+                        cv2.putText(disp_l, f"Width: {stable_width_px:.1f} px | {width_mm:.1f} mm", (30, 50),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                    else:
+                        cv2.putText(disp_l, f"Width: {stable_width_px:.1f} px", (30, 50),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                else:
+                    cv2.putText(disp_l, "Width: N/A", (30, 50),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+
                 # Stitch status on left frame
                 if stitch_calibrated:
                     cv2.putText(disp_l, f"STITCH: calibrated (offset={stitch_offset:.1f})",
@@ -530,10 +641,23 @@ def main():
                 else:
                     for i, cx in enumerate(custom_guides['right']):
                         draw_vertical_guide(disp_r, cx, f"Custom R{i+1}", color=(255, 100, 255))
-                edge_x_int_r = int(round(right_edge_x))
-                cv2.line(disp_r, (edge_x_int_r, 0), (edge_x_int_r, disp_r.shape[0]), (0, 0, 255), 3)
-                cv2.putText(disp_r, f"Right Edge X: {right_edge_x:.1f} px", (30, 50),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+
+                # Draw detected edges on right frame
+                if right_result is not None:
+                    for i, ex in enumerate(right_result['left_edges']):
+                        ex_int = int(round(ex))
+                        cv2.line(disp_r, (ex_int, 0), (ex_int, disp_r.shape[0]), (0, 255, 0), 3)
+                        cv2.putText(disp_r, f"L-edge {i+1}: {ex:.1f}", (ex_int + 5, 80 + i * 30),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                    for i, ex in enumerate(right_result['right_edges']):
+                        ex_int = int(round(ex))
+                        cv2.line(disp_r, (ex_int, 0), (ex_int, disp_r.shape[0]), (255, 100, 0), 3)
+                        cv2.putText(disp_r, f"R-edge {i+1}: {ex:.1f}", (ex_int + 5, 80 + (len(right_result['left_edges']) + i) * 30),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 100, 0), 2)
+                else:
+                    cv2.putText(disp_r, "NO CLOTH", (30, 80),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
+
                 if right_aoi:
                     ax, ay, aw, ah = right_aoi
                     cv2.rectangle(disp_r, (ax, ay), (ax + aw, ay + ah), (255, 255, 0), 2)
@@ -544,12 +668,15 @@ def main():
                 elapsed = time.perf_counter() - fps_tick
                 fps = frame_count / elapsed if elapsed > 0 else 0
 
-                if width_mm is not None:
-                    print(f"Width: {stable_width_px:07.1f} px | {width_mm:07.1f} mm | "
-                          f"Raw: {raw_width_px:07.1f} px | FPS: {fps:.1f}    ", end='\r')
+                if stable_width_px is not None:
+                    if width_mm is not None:
+                        print(f"Width: {stable_width_px:07.1f} px | {width_mm:07.1f} mm | "
+                              f"Raw: {raw_width_px:07.1f} px | FPS: {fps:.1f}    ", end='\r')
+                    else:
+                        print(f"Width: {stable_width_px:07.1f} px | "
+                              f"Raw: {raw_width_px:07.1f} px | FPS: {fps:.1f}    ", end='\r')
                 else:
-                    print(f"Width: {stable_width_px:07.1f} px | "
-                          f"Raw: {raw_width_px:07.1f} px | FPS: {fps:.1f}    ", end='\r')
+                    print(f"Width: None (no cloth) | FPS: {fps:.1f}    ", end='\r')
 
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q'):
@@ -560,7 +687,6 @@ def main():
             elif key == ord('s'):
                 # Stitch calibration: compute offset from known cloth width
                 if args.cloth_width_mm is not None and args.cloth_width_mm > 0:
-                    # offset = known_width + left_edge - right_edge
                     stitch_offset = args.cloth_width_mm + current_left_edge - current_right_edge
                     stitch_calibrated = True
                     save_stitch_offset(stitch_offset, args.cloth_width_mm,

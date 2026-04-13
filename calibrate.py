@@ -391,7 +391,17 @@ def run_perspective(args):
     """
     Computes a homography matrix turning the fabric plane into a flat, 
     top-down orthographic view to correct perspective scaling distortion.
+
+    Strategy:
+      1. Try AUTO-DETECT: Find checkerboard corners with sub-pixel accuracy,
+         then compute homography via cv2.findHomography(RANSAC) using all
+         detected corner pairs (~90 points for a 10x9 board).
+      2. FALLBACK: If no checkerboard is detected, allow the user to manually
+         click 4 corner points of a known rectangle (legacy behaviour).
     """
+    board_size = (args.cols, args.rows)
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+
     cameras = []
     if args.camera in ("left", "both"):
         cameras.append(("left", args.left_src, os.path.join(CALIB_DIR, "left_calib.json"), os.path.join(CALIB_DIR, "left_homography.json")))
@@ -436,7 +446,95 @@ def run_perspective(args):
         # Apply lens undistortion first
         if mapx is not None and mapy is not None:
             frame = cv2.remap(frame, mapx, mapy, cv2.INTER_LINEAR)
-            
+
+        out_w = w if w > 0 else frame.shape[1]
+        out_h = h if h > 0 else frame.shape[0]
+        px_scale = args.px_per_mm
+
+        # ── ATTEMPT 1: Auto-detect checkerboard ────────────────────────────
+        log.info("[%s] Attempting automatic checkerboard detection (%dx%d)...", cam_name, args.cols, args.rows)
+        found, corners = find_chessboard(frame, board_size)
+
+        if found:
+            # Sub-pixel refinement for maximum accuracy
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            corners_refined = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), criteria)
+
+            num_points = len(corners_refined)
+            log.info("[%s] Checkerboard FOUND — %d sub-pixel corners detected.", cam_name, num_points)
+
+            # Build real-world coordinates for each corner (in mm)
+            obj_pts_mm = np.zeros((args.rows * args.cols, 2), dtype=np.float32)
+            obj_pts_mm[:, :] = np.mgrid[0:args.cols, 0:args.rows].T.reshape(-1, 2) * args.square_mm
+
+            # Build destination points: place the board centred in the output image
+            board_w_mm = (args.cols - 1) * args.square_mm
+            board_h_mm = (args.rows - 1) * args.square_mm
+            board_w_px = board_w_mm * px_scale
+            board_h_px = board_h_mm * px_scale
+
+            cx, cy = out_w / 2, out_h / 2
+            # Offset so that the board centre maps to image centre
+            origin_x = cx - board_w_px / 2
+            origin_y = cy - board_h_px / 2
+
+            dst_pts = np.zeros_like(obj_pts_mm)
+            dst_pts[:, 0] = origin_x + obj_pts_mm[:, 0] * px_scale
+            dst_pts[:, 1] = origin_y + obj_pts_mm[:, 1] * px_scale
+
+            src_pts = corners_refined.reshape(-1, 2)
+
+            # Compute homography with RANSAC (robust to any misdetected corners)
+            M, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 3.0)
+            inliers = int(mask.sum()) if mask is not None else 0
+            log.info("[%s] Homography computed: %d/%d inliers", cam_name, inliers, num_points)
+
+            # Compute reprojection error
+            src_h = np.hstack([src_pts, np.ones((len(src_pts), 1))])
+            projected = (M @ src_h.T).T
+            projected = projected[:, :2] / projected[:, 2:3]
+            errors = np.linalg.norm(projected - dst_pts, axis=1)
+            mean_err = float(np.mean(errors))
+            max_err = float(np.max(errors))
+            log.info("[%s] Reprojection error: mean=%.3f px, max=%.3f px", cam_name, mean_err, max_err)
+
+            if mean_err > 2.0:
+                log.warning("[%s] High reprojection error (>2px). Consider re-running with a cleaner checkerboard placement.", cam_name)
+
+            # Show preview
+            warped = cv2.warpPerspective(frame, M, (out_w, out_h))
+            win = f"Perspective Preview - {cam_name.upper()} (auto-detected)"
+            cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+            cv2.imshow(win, warped)
+            log.info("[%s] Preview shown. Press any key to accept, or 'r' to reject and use manual mode.", cam_name)
+            k = cv2.waitKey(0) & 0xFF
+            cv2.destroyWindow(win)
+
+            if k == ord('r'):
+                log.info("[%s] Auto-detection rejected by user. Falling back to manual mode.", cam_name)
+                found = False  # Fall through to manual mode below
+            else:
+                # Save the homography
+                hdata = {
+                    "homography": M.tolist(),
+                    "scale_px_per_mm": px_scale,
+                    "out_width": out_w,
+                    "out_height": out_h,
+                    "method": "auto_checkerboard_RANSAC",
+                    "num_points": num_points,
+                    "inliers": inliers,
+                    "reproj_error_mean_px": round(mean_err, 4),
+                    "reproj_error_max_px": round(max_err, 4),
+                }
+                with open(out_path, "w", encoding="utf-8") as f:
+                    json.dump(hdata, f, indent=2)
+                log.info("[%s] Saved homography (auto) to %s", cam_name, out_path)
+                continue  # Done with this camera
+
+        # ── ATTEMPT 2: Manual 4-point click (fallback) ─────────────────────
+        if not found:
+            log.info("[%s] Checkerboard NOT detected. Falling back to manual 4-point mode.", cam_name)
+
         pts = []
         win = f"Perspective - {cam_name.upper()}"
         cv2.namedWindow(win, cv2.WINDOW_NORMAL)
@@ -481,13 +579,9 @@ def run_perspective(args):
             
         src_rect = np.array(pts, dtype="float32")
         
-        out_w = w if w > 0 else frame.shape[1]
-        out_h = h if h > 0 else frame.shape[0]
-        
         phys_w = args.rect_width_mm
         phys_h = args.rect_height_mm
         
-        px_scale = args.px_per_mm
         tw = int(phys_w * px_scale)
         th = int(phys_h * px_scale)
         
@@ -502,16 +596,17 @@ def run_perspective(args):
         
         M = cv2.getPerspectiveTransform(src_rect, dst_rect)
         
-        data = {
+        hdata = {
             "homography": M.tolist(),
             "scale_px_per_mm": px_scale,
             "out_width": out_w,
-            "out_height": out_h
+            "out_height": out_h,
+            "method": "manual_4point",
         }
         with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+            json.dump(hdata, f, indent=2)
             
-        log.info("[%s] Saved homography to %s", cam_name, out_path)
+        log.info("[%s] Saved homography (manual) to %s", cam_name, out_path)
 
     log.info("Perspective calibration done.")
 
@@ -539,9 +634,10 @@ def main():
 
     persp_p = sub.add_parser("perspective", parents=[shared],
                              help="Calibrate perspective (homography) to get top-down view")
-    persp_p.add_argument('--rect-width-mm', type=float, default=500.0, help='Physical width of the calibration rectangle in mm')
-    persp_p.add_argument('--rect-height-mm', type=float, default=200.0, help='Physical height of the calibration rectangle in mm')
+    persp_p.add_argument('--rect-width-mm', type=float, default=500.0, help='Physical width of the calibration rectangle in mm (manual mode)')
+    persp_p.add_argument('--rect-height-mm', type=float, default=200.0, help='Physical height of the calibration rectangle in mm (manual mode)')
     persp_p.add_argument('--px-per-mm', type=float, default=1.0, help='Scaling factor in the output top-down image')
+    persp_p.add_argument('--square-mm', type=float, default=25.0, help='Checkerboard square size in mm (for auto-detect mode)')
 
     test_p = sub.add_parser("test", parents=[shared],
                             help="Test intrinsic calibration by viewing side-by-side original and undistorted streams")
