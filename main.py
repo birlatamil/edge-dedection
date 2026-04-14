@@ -554,13 +554,32 @@ def main():
                             overlap_px = 144
                         raw_width_px = leftmost_edge + (width_right_frame - rightmost_edge) - overlap_px
 
-                elif left_has_cloth and not right_has_cloth and len(left_all) >= 2:
-                    # CASE 2a: Cloth visible ONLY in left camera (2 edges)
-                    raw_width_px = abs(left_all[-1] - left_all[0])
+                elif left_has_cloth and not right_has_cloth:
+                    # CASE 2a: Cloth visible ONLY in left camera
+                    # A cloth edge pair MUST be: rising gradient (dark→cloth) on left,
+                    # falling gradient (cloth→dark) on right.
+                    # We require at least one of each type to get a valid measurement.
+                    l_rising  = left_result['left_edges']   # positive Sobel-X peaks
+                    l_falling = left_result['right_edges']  # negative Sobel-X peaks
+                    if len(l_rising) >= 1 and len(l_falling) >= 1:
+                        cloth_left  = l_rising[0]    # leftmost rising edge = left cloth boundary
+                        cloth_right = l_falling[-1]  # rightmost falling edge = right cloth boundary
+                        if cloth_right > cloth_left:  # sanity: right must be to the right of left
+                            raw_width_px = cloth_right - cloth_left
+                        else:
+                            raw_width_px = None  # inverted — likely false detections
 
-                elif right_has_cloth and not left_has_cloth and len(right_all) >= 2:
-                    # CASE 2b: Cloth visible ONLY in right camera (2 edges)
-                    raw_width_px = abs(right_all[-1] - right_all[0])
+                elif right_has_cloth and not left_has_cloth:
+                    # CASE 2b: Cloth visible ONLY in right camera
+                    r_rising  = right_result['left_edges']
+                    r_falling = right_result['right_edges']
+                    if len(r_rising) >= 1 and len(r_falling) >= 1:
+                        cloth_left  = r_rising[0]
+                        cloth_right = r_falling[-1]
+                        if cloth_right > cloth_left:
+                            raw_width_px = cloth_right - cloth_left
+                        else:
+                            raw_width_px = None
 
                 else:
                     # CASE 3: No cloth detected / only 1 edge in 1 camera
