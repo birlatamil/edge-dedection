@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Fabric Edge Detection System — Real-time width measurement dashboard" />
+  <title>Fabric Edge Detection</title>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <div class="app-layout">
+
+    <!-- Mobile menu button -->
+    <button class="mobile-menu-btn" id="mobile-menu-btn">☰</button>
+
+    <!-- ── Sidebar ─────────────────────────────────────────── -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <a href="#" class="sidebar-logo">
+          <div class="logo-icon">⬡</div>
+          <div>
+            <div class="logo-text">FabricEdge</div>
+            <div class="logo-sub">Detection System</div>
+          </div>
+        </a>
+      </div>
+
+      <nav class="sidebar-nav">
+        <div class="nav-section-title">Monitor</div>
+        <button class="nav-item active" data-page="dashboard">
+          <span class="nav-icon">📏</span> Dashboard
+        </button>
+        <button class="nav-item" data-page="cameras">
+          <span class="nav-icon">📷</span> Camera Feeds
+        </button>
+
+        <div class="nav-section-title">Configure</div>
+        <button class="nav-item" data-page="settings">
+          <span class="nav-icon">⚙️</span> Settings
+        </button>
+        <button class="nav-item" data-page="calibration">
+          <span class="nav-icon">📐</span> Calibration
+        </button>
+
+        <div class="nav-section-title">System</div>
+        <button class="nav-item" data-page="status">
+          <span class="nav-icon">💚</span> Status
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <!-- API URL Config -->
+        <div class="form-group" style="margin-bottom:12px">
+          <label class="form-label" style="font-size:0.68rem; text-transform:uppercase; letter-spacing:0.05em; color:var(--text-tertiary)">API Server</label>
+          <input type="text" class="form-input" id="api-url-input" value="http://localhost:8000" style="font-size:0.75rem; padding:4px 8px" />
+        </div>
+        <div class="connection-status">
+          <span class="status-dot" id="connection-dot"></span>
+          <span id="connection-text">Connecting...</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ── Main Content ────────────────────────────────────── -->
+    <main class="main-content" id="page-content">
+      <!-- Modules render here -->
+    </main>
+
+  </div>
+
+  <!-- Toast notifications -->
+  <div class="toast-container" id="toast-container"></div>
+
+  <!-- Scripts -->
+  <script src="js/api.js"></script>
+  <script src="js/modules/dashboard.js"></script>
+  <script src="js/modules/cameras.js"></script>
+  <script src="js/modules/settings.js"></script>
+  <script src="js/modules/calibration.js"></script>
+  <script src="js/modules/status.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
