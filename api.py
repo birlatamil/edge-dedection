@@ -45,6 +45,12 @@ from main import (
     STITCH_OFFSET_FILE,
 )
 
+from calibrate import (
+    find_chessboard,
+    CALIB_DIR,
+    CAPTURE_DIR,
+)
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Pydantic Models (Request / Response schemas)
@@ -467,10 +473,12 @@ async def get_snapshot(
 async def stream_camera(
     side: str,
     quality: int = Query(60, ge=10, le=100),
+    annotated: bool = Query(False, description="Overlay edge detection line on each frame"),
 ):
     """
     MJPEG stream from the specified camera.
     Use as an <img> src in the browser: <img src="/api/camera/left/stream" />
+    Set `annotated=true` to overlay detected edge lines on each frame.
     """
     if side not in ("left", "right"):
         raise HTTPException(status_code=400, detail="Side must be 'left' or 'right'")
@@ -483,6 +491,16 @@ async def stream_camera(
         while state.running:
             ret, frame = cam.read()
             if ret and frame is not None:
+                if annotated:
+                    aoi = state.left_aoi if side == "left" else state.right_aoi
+                    roi = crop_to_aoi(frame, aoi) if aoi else frame
+                    edge_x = find_fabric_edge_canny(roi, state.canny_low, state.canny_high)
+                    if aoi:
+                        edge_x += aoi[0]
+                    edge_x_int = int(round(edge_x))
+                    cv2.line(frame, (edge_x_int, 0), (edge_x_int, frame.shape[0]), (0, 0, 255), 3)
+                    cv2.putText(frame, f"Edge: {edge_x:.1f}px", (30, 50),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
                 jpeg = frame_to_bytes(frame, quality)
                 yield (
                     b"--frame\r\n"
@@ -726,7 +744,183 @@ async def get_full_config():
     )
 
 
-# ── 12. Health Check ───────────────────────────────────────────────────────────
+# ── 12. Chessboard Calibration ─────────────────────────────────────────────────
+
+class ChessboardCaptureRequest(BaseModel):
+    side: str = Field(pattern="^(left|right)$")
+    cols: int = Field(ge=3, le=20, default=10)
+    rows: int = Field(ge=3, le=20, default=9)
+
+
+class ChessboardCalibrateRequest(BaseModel):
+    side: str = Field(pattern="^(left|right)$")
+    cols: int = Field(ge=3, le=20, default=10)
+    rows: int = Field(ge=3, le=20, default=9)
+    square_mm: float = Field(gt=0, default=25.0)
+
+
+@app.get("/api/calibration/chessboard/status", tags=["Calibration"])
+async def chessboard_status():
+    """
+    Get the number of captured chessboard images per camera
+    and whether lens calibration files exist.
+    """
+    from pathlib import Path
+    result = {}
+    for side in ["left", "right"]:
+        img_dir = os.path.join(CAPTURE_DIR, side)
+        exts = {".png", ".jpg", ".jpeg", ".bmp"}
+        if os.path.isdir(img_dir):
+            count = sum(1 for p in Path(img_dir).iterdir() if p.suffix.lower() in exts)
+        else:
+            count = 0
+        calib_exists = os.path.exists(os.path.join(CALIB_DIR, f"{side}_calib.json"))
+        result[side] = {
+            "captured_images": count,
+            "calibration_exists": calib_exists,
+        }
+    return result
+
+
+@app.post("/api/calibration/chessboard/capture", tags=["Calibration"])
+async def chessboard_capture(req: ChessboardCaptureRequest):
+    """
+    Capture a single frame from the specified camera, attempt to find
+    chessboard corners, and save the image if found.
+    """
+    cam = state.left_cam if req.side == "left" else state.right_cam
+    if cam is None:
+        raise HTTPException(status_code=503, detail=f"{req.side} camera not initialized")
+
+    ret, frame = cam.read()
+    if not ret or frame is None:
+        raise HTTPException(status_code=503, detail=f"{req.side} camera not returning frames")
+
+    board_size = (req.cols, req.rows)
+    found, corners = find_chessboard(frame, board_size)
+
+    if not found:
+        return {
+            "success": False,
+            "message": "Chessboard not detected in the current frame. Adjust position and try again.",
+            "corners_found": 0,
+        }
+
+    # Save the image
+    save_dir = os.path.join(CAPTURE_DIR, req.side)
+    os.makedirs(save_dir, exist_ok=True)
+    from pathlib import Path
+    exts = {".png", ".jpg", ".jpeg", ".bmp"}
+    existing = sum(1 for p in Path(save_dir).iterdir() if p.suffix.lower() in exts)
+    fname = os.path.join(save_dir, f"{req.side}_{existing:03d}.png")
+    cv2.imwrite(fname, frame)
+
+    return {
+        "success": True,
+        "message": f"Frame captured and saved ({existing + 1} total)",
+        "corners_found": len(corners),
+        "total_images": existing + 1,
+        "file": fname,
+    }
+
+
+@app.post("/api/calibration/chessboard/run", tags=["Calibration"])
+async def chessboard_run(req: ChessboardCalibrateRequest):
+    """
+    Run the full chessboard lens calibration on saved images.
+    Computes intrinsic parameters + distortion coefficients.
+    """
+    from pathlib import Path
+    board_size = (req.cols, req.rows)
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+
+    # 3D object points
+    objp = np.zeros((req.rows * req.cols, 3), np.float32)
+    objp[:, :2] = np.mgrid[0:req.cols, 0:req.rows].T.reshape(-1, 2) * req.square_mm
+
+    img_folder = os.path.join(CAPTURE_DIR, req.side)
+    exts = {".png", ".jpg", ".jpeg", ".bmp"}
+    paths = sorted(p for p in Path(img_folder).iterdir() if p.suffix.lower() in exts) if os.path.isdir(img_folder) else []
+
+    if len(paths) < 5:
+        raise HTTPException(status_code=400, detail=f"Need at least 5 images, found {len(paths)}. Capture more frames first.")
+
+    obj_points = []
+    img_points = []
+    img_size = None
+    detected = 0
+
+    for p in paths:
+        img = cv2.imread(str(p))
+        if img is None:
+            continue
+        if img_size is None:
+            img_size = (img.shape[1], img.shape[0])
+
+        found, corners = find_chessboard(img, board_size)
+        if found:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            corners_refined = cv2.cornerSubPix(
+                gray, corners, (11, 11), (-1, -1), criteria)
+            obj_points.append(objp)
+            img_points.append(corners_refined)
+            detected += 1
+
+    if len(obj_points) < 5:
+        raise HTTPException(status_code=400, detail=f"Only {len(obj_points)} images had detectable chessboards. Need at least 5.")
+
+    calib_flags = cv2.CALIB_FIX_K3
+    rms, camera_matrix, dist_coeffs, rvecs, tvecs = cv2.calibrateCamera(
+        obj_points, img_points, img_size, None, None, flags=calib_flags)
+
+    # Per-image reprojection error
+    per_image_errors = []
+    for i in range(len(obj_points)):
+        img_pts_proj, _ = cv2.projectPoints(obj_points[i], rvecs[i], tvecs[i], camera_matrix, dist_coeffs)
+        err = cv2.norm(img_points[i], img_pts_proj, cv2.NORM_L2) / len(img_pts_proj)
+        per_image_errors.append(round(err, 4))
+
+    # Save calibration
+    out_path = os.path.join(CALIB_DIR, f"{req.side}_calib.json")
+    os.makedirs(CALIB_DIR, exist_ok=True)
+    data = {
+        "camera_matrix": camera_matrix.tolist(),
+        "dist_coeffs": dist_coeffs.flatten().tolist(),
+        "image_width_px": img_size[0],
+        "image_height_px": img_size[1],
+        "rms": round(rms, 6),
+        "per_image_rms": per_image_errors,
+        "calib_flags": "CALIB_FIX_K3",
+    }
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+    return {
+        "success": True,
+        "message": f"Calibration complete for {req.side} camera",
+        "rms": round(rms, 4),
+        "images_used": detected,
+        "total_images": len(paths),
+        "per_image_rms": per_image_errors,
+        "file": out_path,
+    }
+
+
+@app.delete("/api/calibration/chessboard/images/{side}", tags=["Calibration"])
+async def chessboard_clear_images(side: str):
+    """Clear all captured chessboard images for a camera."""
+    if side not in ("left", "right"):
+        raise HTTPException(status_code=400, detail="Side must be 'left' or 'right'")
+
+    import shutil
+    img_dir = os.path.join(CAPTURE_DIR, side)
+    if os.path.isdir(img_dir):
+        shutil.rmtree(img_dir)
+        os.makedirs(img_dir, exist_ok=True)
+    return {"message": f"Cleared all chessboard images for {side} camera"}
+
+
+# ── 13. Health Check ───────────────────────────────────────────────────────────
 
 @app.get("/health", tags=["System"])
 async def health():

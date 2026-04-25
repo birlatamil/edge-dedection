@@ -153,7 +153,7 @@ const Cameras = (() => {
     }
 
     state[side].mode = 'stream';
-    feed.src = API.streamUrl(side, getQuality());
+    feed.src = API.streamUrl(side, getQuality(), state[side].annotated);
     feed.style.display = 'block';
     if (placeholder) placeholder.style.display = 'none';
     if (statusEl) { statusEl.textContent = 'Streaming'; statusEl.className = 'status-tag online'; }
@@ -172,7 +172,10 @@ const Cameras = (() => {
 
   function toggleAnnotation(side) {
     state[side].annotated = !state[side].annotated;
-    if (state[side].mode === 'snapshot') {
+    if (state[side].mode === 'stream') {
+      // Restart stream with updated annotated flag
+      startStream(side);
+    } else {
       refreshSnapshot(side);
     }
     App.toast(state[side].annotated ? 'Edge overlay enabled' : 'Edge overlay disabled', 'info');

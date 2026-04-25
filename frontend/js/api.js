@@ -60,8 +60,8 @@ const API = (() => {
     return `${baseUrl}/api/camera/${side}/snapshot?quality=${quality}&annotated=${annotated}&t=${Date.now()}`;
   }
 
-  function streamUrl(side, quality = 60) {
-    return `${baseUrl}/api/camera/${side}/stream?quality=${quality}`;
+  function streamUrl(side, quality = 60, annotated = false) {
+    return `${baseUrl}/api/camera/${side}/stream?quality=${quality}&annotated=${annotated}`;
   }
 
   // ── AOI ─────────────────────────────────────────────────────
@@ -139,6 +139,32 @@ const API = (() => {
     return request(`/api/calibration/homography/${side}`);
   }
 
+  // ── Chessboard Calibration ──────────────────────────────────
+
+  async function chessboardStatus() {
+    return request('/api/calibration/chessboard/status');
+  }
+
+  async function chessboardCapture(side, cols = 10, rows = 9) {
+    return request('/api/calibration/chessboard/capture', {
+      method: 'POST',
+      body: JSON.stringify({ side, cols, rows }),
+    });
+  }
+
+  async function chessboardRun(side, cols = 10, rows = 9, squareMm = 25.0) {
+    return request('/api/calibration/chessboard/run', {
+      method: 'POST',
+      body: JSON.stringify({ side, cols, rows, square_mm: squareMm }),
+    });
+  }
+
+  async function chessboardClearImages(side) {
+    return request(`/api/calibration/chessboard/images/${side}`, {
+      method: 'DELETE',
+    });
+  }
+
   // ── Full Config ─────────────────────────────────────────────
 
   async function getConfig() {
@@ -168,5 +194,9 @@ const API = (() => {
     getLensCalibration,
     getHomography,
     getConfig,
+    chessboardStatus,
+    chessboardCapture,
+    chessboardRun,
+    chessboardClearImages,
   };
 })();

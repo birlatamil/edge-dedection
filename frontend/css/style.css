@@ -913,3 +913,160 @@ body {
   align-items: center;
   justify-content: space-between;
 }
+
+/* ── Chessboard Calibration UI ──────────────────────────────── */
+
+.calib-step-group {
+  padding: var(--space-lg) 0;
+  border-bottom: 1px solid var(--border-light);
+}
+
+.calib-step-group:last-child {
+  border-bottom: none;
+  padding-bottom: var(--space-sm);
+}
+
+.calib-step-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  margin-bottom: var(--space-md);
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.calib-step-num {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--text-inverse);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.75rem;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.calib-capture-row {
+  display: flex;
+  gap: var(--space-sm);
+  align-items: center;
+}
+
+.calib-capture-feedback {
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--radius-sm);
+  font-size: 0.82rem;
+  font-weight: 500;
+}
+
+.calib-capture-feedback.success {
+  background: var(--success-bg);
+  color: var(--success);
+  border: 1px solid var(--success);
+}
+
+.calib-capture-feedback.error {
+  background: var(--error-bg);
+  color: var(--error);
+  border: 1px solid var(--error);
+}
+
+.calib-camera-status {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-md) var(--space-lg);
+}
+
+.calib-camera-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-md);
+}
+
+.calib-camera-label {
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: var(--text-primary);
+}
+
+.calib-camera-stats {
+  display: flex;
+  gap: var(--space-xl);
+}
+
+.calib-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.calib-stat-value {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  line-height: 1.2;
+}
+
+.calib-stat-label {
+  font-size: 0.7rem;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-top: var(--space-xs);
+}
+
+.calib-rms-badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 99px;
+  font-size: 0.78rem;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.calib-rms-badge.excellent {
+  background: var(--success-bg);
+  color: var(--success);
+}
+
+.calib-rms-badge.good {
+  background: var(--info-bg);
+  color: var(--info);
+}
+
+.calib-rms-badge.poor {
+  background: var(--error-bg);
+  color: var(--error);
+}
+
+.calib-details {
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.calib-details summary {
+  padding: var(--space-sm) var(--space-md);
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  cursor: pointer;
+  background: var(--bg-tertiary);
+  user-select: none;
+  transition: background 0.15s ease;
+}
+
+.calib-details summary:hover {
+  background: var(--bg-hover);
+}
+
+.calib-details[open] summary {
+  border-bottom: 1px solid var(--border-light);
+}
+

@@ -1,5 +1,6 @@
 /**
  * calibration.js — Calibration management module
+ * Includes: Stitch, Runtime Scale, Chessboard Lens, and Homography/Perspective calibration
  */
 
 const Calibration = (() => {
@@ -8,7 +9,104 @@ const Calibration = (() => {
     return `
       <div class="page-header">
         <h1 class="page-title">Calibration</h1>
-        <p class="page-subtitle">Configure stitch offset and pixel-to-millimeter conversion</p>
+        <p class="page-subtitle">Configure stitch offset, pixel-to-millimeter conversion, lens correction, and perspective calibration</p>
+      </div>
+
+      <!-- Chessboard Lens Calibration -->
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title"><span class="card-icon">♟️</span> Chessboard Lens Calibration</span>
+          <span class="card-badge" id="cal-chess-badge">Loading...</span>
+        </div>
+        <p class="page-subtitle mb-md">
+          Capture multiple images of a chessboard pattern from the camera, then run calibration to compute
+          lens distortion coefficients. This corrects barrel/pincushion distortion for accurate measurements.
+        </p>
+
+        <!-- Board config -->
+        <div class="calib-step-group">
+          <div class="calib-step-header">
+            <span class="calib-step-num">1</span>
+            <span>Configure Board Parameters</span>
+          </div>
+          <div class="grid-4">
+            <div class="form-group">
+              <label class="form-label">Camera</label>
+              <select class="form-input" id="cal-chess-side">
+                <option value="left">Left Camera</option>
+                <option value="right">Right Camera</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Inner Columns</label>
+              <input type="number" class="form-input" id="cal-chess-cols" value="10" min="3" max="20" />
+            </div>
+            <div class="form-group">
+              <label class="form-label">Inner Rows</label>
+              <input type="number" class="form-input" id="cal-chess-rows" value="9" min="3" max="20" />
+            </div>
+            <div class="form-group">
+              <label class="form-label">Square Size <span class="form-sublabel">mm</span></label>
+              <input type="number" class="form-input" id="cal-chess-square" value="25.0" step="0.1" min="1" />
+            </div>
+          </div>
+        </div>
+
+        <!-- Capture -->
+        <div class="calib-step-group">
+          <div class="calib-step-header">
+            <span class="calib-step-num">2</span>
+            <span>Capture Chessboard Frames</span>
+          </div>
+          <div class="calib-capture-row">
+            <button class="btn btn-primary" onclick="Calibration.captureFrame()" id="cal-chess-capture-btn">📸 Capture Frame</button>
+            <button class="btn btn-danger" onclick="Calibration.clearImages()" id="cal-chess-clear-btn">🗑️ Clear Images</button>
+          </div>
+          <div id="cal-chess-capture-result" class="mt-md"></div>
+        </div>
+
+        <!-- Status per camera -->
+        <div class="calib-step-group">
+          <div class="calib-step-header">
+            <span class="calib-step-num">3</span>
+            <span>Captured Images & Calibration Status</span>
+          </div>
+          <div class="grid-2" id="cal-chess-status">
+            <div class="empty-state" style="padding: var(--space-lg)">
+              <span class="spinner"></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Run calibration -->
+        <div class="calib-step-group">
+          <div class="calib-step-header">
+            <span class="calib-step-num">4</span>
+            <span>Run Lens Calibration</span>
+          </div>
+          <p class="page-subtitle mb-md">Requires at least 5 captured images with detected chessboard patterns.</p>
+          <button class="btn btn-primary" onclick="Calibration.runChessboardCalibration()" id="cal-chess-run-btn">⚡ Run Calibration</button>
+          <div id="cal-chess-run-result" class="mt-md"></div>
+        </div>
+      </div>
+
+      <!-- Homography / Perspective -->
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title"><span class="card-icon">🔬</span> Lens & Perspective Data</span>
+          <div class="btn-group">
+            <button class="btn btn-sm btn-secondary" onclick="Calibration.loadLensData('left')">Left Lens</button>
+            <button class="btn btn-sm btn-secondary" onclick="Calibration.loadLensData('right')">Right Lens</button>
+            <button class="btn btn-sm btn-secondary" onclick="Calibration.loadHomography('left')">Left Homography</button>
+            <button class="btn btn-sm btn-secondary" onclick="Calibration.loadHomography('right')">Right Homography</button>
+          </div>
+        </div>
+        <div id="cal-data-viewer">
+          <div class="empty-state">
+            <span class="empty-icon">🔬</span>
+            <p class="empty-text">Click a button above to view calibration data</p>
+          </div>
+        </div>
       </div>
 
       <!-- Stitch Calibration -->
@@ -77,33 +175,205 @@ const Calibration = (() => {
 
         <div id="cal-runtime-result"></div>
       </div>
-
-      <!-- Lens & Homography Data -->
-      <div class="card">
-        <div class="card-header">
-          <span class="card-title"><span class="card-icon">🔬</span> Lens & Perspective Data</span>
-          <div class="btn-group">
-            <button class="btn btn-sm btn-secondary" onclick="Calibration.loadLensData('left')">Left Lens</button>
-            <button class="btn btn-sm btn-secondary" onclick="Calibration.loadLensData('right')">Right Lens</button>
-            <button class="btn btn-sm btn-secondary" onclick="Calibration.loadHomography('left')">Left Homography</button>
-            <button class="btn btn-sm btn-secondary" onclick="Calibration.loadHomography('right')">Right Homography</button>
-          </div>
-        </div>
-        <div id="cal-data-viewer">
-          <div class="empty-state">
-            <span class="empty-icon">🔬</span>
-            <p class="empty-text">Click a button above to view calibration data</p>
-          </div>
-        </div>
-      </div>
     `;
   }
 
   async function init() {
-    await loadStitchData();
+    await Promise.all([
+      loadStitchData(),
+      loadChessboardStatus(),
+    ]);
   }
 
   function destroy() {}
+
+  // ── Chessboard Calibration ──────────────────────────────────────────
+
+  async function loadChessboardStatus() {
+    const container = document.getElementById('cal-chess-status');
+    const badge = document.getElementById('cal-chess-badge');
+    if (!container) return;
+
+    try {
+      const data = await API.chessboardStatus();
+      let bothCalibrated = true;
+      let html = '';
+
+      for (const side of ['left', 'right']) {
+        const info = data[side];
+        const hasCalib = info.calibration_exists;
+        if (!hasCalib) bothCalibrated = false;
+
+        html += `
+          <div class="calib-camera-status">
+            <div class="calib-camera-header">
+              <span class="calib-camera-label">${side === 'left' ? '📷 Left' : '📷 Right'} Camera</span>
+              <span class="status-tag ${hasCalib ? 'online' : 'pending'}">${hasCalib ? 'Calibrated' : 'Not Calibrated'}</span>
+            </div>
+            <div class="calib-camera-stats">
+              <div class="calib-stat">
+                <span class="calib-stat-value">${info.captured_images}</span>
+                <span class="calib-stat-label">Images Captured</span>
+              </div>
+              <div class="calib-stat">
+                <span class="calib-stat-value">${hasCalib ? '✅' : '—'}</span>
+                <span class="calib-stat-label">Lens Calibration</span>
+              </div>
+            </div>
+          </div>
+        `;
+      }
+
+      container.innerHTML = html;
+      if (badge) {
+        if (bothCalibrated) {
+          badge.textContent = 'Both Calibrated';
+          badge.className = 'card-badge success';
+        } else {
+          badge.textContent = 'Setup Required';
+          badge.className = 'card-badge warning';
+        }
+      }
+    } catch (err) {
+      container.innerHTML = `
+        <div class="empty-state" style="padding: var(--space-lg)">
+          <span class="empty-icon">🔌</span>
+          <p class="empty-text">Cannot connect to backend</p>
+          <p class="empty-sub">${err.detail || 'Check that the API server is running'}</p>
+        </div>
+      `;
+      if (badge) { badge.textContent = 'Offline'; badge.className = 'card-badge error'; }
+    }
+  }
+
+  async function captureFrame() {
+    const side = document.getElementById('cal-chess-side')?.value || 'left';
+    const cols = parseInt(document.getElementById('cal-chess-cols')?.value) || 10;
+    const rows = parseInt(document.getElementById('cal-chess-rows')?.value) || 9;
+    const btn = document.getElementById('cal-chess-capture-btn');
+    const resultDiv = document.getElementById('cal-chess-capture-result');
+
+    if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Capturing...'; }
+
+    try {
+      const result = await API.chessboardCapture(side, cols, rows);
+      if (result.success) {
+        App.toast(`Frame captured! ${result.total_images} total images.`, 'success');
+        if (resultDiv) {
+          resultDiv.innerHTML = `
+            <div class="calib-capture-feedback success">
+              ✅ Chessboard detected — ${result.corners_found} corners found. ${result.message}
+            </div>
+          `;
+        }
+      } else {
+        App.toast('Chessboard not detected in frame', 'error');
+        if (resultDiv) {
+          resultDiv.innerHTML = `
+            <div class="calib-capture-feedback error">
+              ❌ ${result.message}
+            </div>
+          `;
+        }
+      }
+      await loadChessboardStatus();
+    } catch (err) {
+      App.toast(`Capture failed: ${err.detail}`, 'error');
+      if (resultDiv) {
+        resultDiv.innerHTML = `
+          <div class="calib-capture-feedback error">
+            ❌ ${err.detail || 'Capture failed'}
+          </div>
+        `;
+      }
+    } finally {
+      if (btn) { btn.disabled = false; btn.innerHTML = '📸 Capture Frame'; }
+    }
+  }
+
+  async function clearImages() {
+    const side = document.getElementById('cal-chess-side')?.value || 'left';
+
+    if (!confirm(`Clear all captured chessboard images for the ${side} camera?`)) return;
+
+    try {
+      await API.chessboardClearImages(side);
+      App.toast(`Cleared images for ${side} camera`, 'success');
+      const resultDiv = document.getElementById('cal-chess-capture-result');
+      if (resultDiv) resultDiv.innerHTML = '';
+      await loadChessboardStatus();
+    } catch (err) {
+      App.toast(`Error: ${err.detail}`, 'error');
+    }
+  }
+
+  async function runChessboardCalibration() {
+    const side = document.getElementById('cal-chess-side')?.value || 'left';
+    const cols = parseInt(document.getElementById('cal-chess-cols')?.value) || 10;
+    const rows = parseInt(document.getElementById('cal-chess-rows')?.value) || 9;
+    const squareMm = parseFloat(document.getElementById('cal-chess-square')?.value) || 25.0;
+    const btn = document.getElementById('cal-chess-run-btn');
+    const resultDiv = document.getElementById('cal-chess-run-result');
+
+    if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Calibrating...'; }
+
+    try {
+      const result = await API.chessboardRun(side, cols, rows, squareMm);
+      App.toast(`Lens calibration complete! RMS: ${result.rms}`, 'success');
+
+      if (resultDiv) {
+        const errRows = result.per_image_rms.map((e, i) => {
+          const status = e < 0.5 ? 'excellent' : e < 1.0 ? 'good' : 'poor';
+          return `<tr>
+            <td>Image ${i + 1}</td>
+            <td><span class="calib-rms-badge ${status}">${e.toFixed(4)} px</span></td>
+          </tr>`;
+        }).join('');
+
+        resultDiv.innerHTML = `
+          <hr class="section-divider" />
+          <div class="grid-3">
+            <div class="stat-card">
+              <div class="stat-label">Overall RMS</div>
+              <div class="stat-value accent">${result.rms.toFixed(4)}</div>
+              <div class="stat-sub">px</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Images Used</div>
+              <div class="stat-value">${result.images_used}</div>
+              <div class="stat-sub">of ${result.total_images}</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Result</div>
+              <div class="stat-value">${result.rms < 1.0 ? '✅' : '⚠️'}</div>
+              <div class="stat-sub">${result.rms < 0.5 ? 'Excellent' : result.rms < 1.0 ? 'Good' : 'Needs Improvement'}</div>
+            </div>
+          </div>
+          <details class="calib-details mt-md">
+            <summary>Per-Image Reprojection Errors</summary>
+            <table class="data-table">
+              <tr><th>Image</th><th>RMS Error</th></tr>
+              ${errRows}
+            </table>
+          </details>
+        `;
+      }
+      await loadChessboardStatus();
+    } catch (err) {
+      App.toast(`Calibration failed: ${err.detail}`, 'error');
+      if (resultDiv) {
+        resultDiv.innerHTML = `
+          <div class="calib-capture-feedback error">
+            ❌ ${err.detail || 'Calibration failed'}
+          </div>
+        `;
+      }
+    } finally {
+      if (btn) { btn.disabled = false; btn.innerHTML = '⚡ Run Calibration'; }
+    }
+  }
+
+  // ── Stitch Calibration ──────────────────────────────────────────────
 
   async function loadStitchData() {
     const badge = document.getElementById('cal-stitch-badge');
@@ -189,6 +459,8 @@ const Calibration = (() => {
     }
   }
 
+  // ── Runtime Calibration ─────────────────────────────────────────────
+
   async function doRuntimeCalibration() {
     const widthInput = document.getElementById('cal-runtime-width');
     const framesInput = document.getElementById('cal-runtime-frames');
@@ -244,6 +516,8 @@ const Calibration = (() => {
     }
   }
 
+  // ── Lens & Homography Data Viewer ───────────────────────────────────
+
   async function loadLensData(side) {
     const viewer = document.getElementById('cal-data-viewer');
     if (!viewer) return;
@@ -256,9 +530,19 @@ const Calibration = (() => {
         <table class="data-table">
           <tr><th>Parameter</th><th>Value</th></tr>
           <tr><td>Image Size</td><td>${data.image_width_px} × ${data.image_height_px} px</td></tr>
-          <tr><td>RMS Error</td><td>${data.rms.toFixed(4)} px</td></tr>
+          <tr><td>RMS Error</td><td><span class="calib-rms-badge ${data.rms < 0.5 ? 'excellent' : data.rms < 1.0 ? 'good' : 'poor'}">${data.rms.toFixed(4)} px</span></td></tr>
+          <tr><td>Calibration Flags</td><td>${data.calib_flags || '—'}</td></tr>
           <tr><td>Distortion (k1…k3, p1, p2)</td><td class="text-mono">${data.dist_coeffs.map(c => c.toFixed(6)).join(', ')}</td></tr>
         </table>
+        ${data.per_image_rms ? `
+          <details class="calib-details mt-md">
+            <summary>Per-Image Reprojection Errors</summary>
+            <table class="data-table">
+              <tr><th>Image</th><th>RMS Error</th></tr>
+              ${data.per_image_rms.map((e, i) => `<tr><td>Image ${i + 1}</td><td><span class="calib-rms-badge ${e < 0.5 ? 'excellent' : e < 1.0 ? 'good' : 'poor'}">${e.toFixed(4)} px</span></td></tr>`).join('')}
+            </table>
+          </details>
+        ` : ''}
       `;
     } catch (err) {
       viewer.innerHTML = `<div class="empty-state"><span class="empty-icon">❌</span><p class="empty-text">${err.detail || 'Failed to load'}</p></div>`;
@@ -272,12 +556,18 @@ const Calibration = (() => {
 
     try {
       const data = await API.getHomography(side);
+      const method = data.method || '—';
+      const methodLabel = method === 'auto_checkerboard_RANSAC' ? 'Auto (Chessboard RANSAC)' : method === 'manual_4point' ? 'Manual (4-Point)' : method;
+
       viewer.innerHTML = `
-        <h4 style="font-size:0.85rem; font-weight:600; margin-bottom:12px">${side.charAt(0).toUpperCase() + side.slice(1)} Camera — Homography</h4>
+        <h4 style="font-size:0.85rem; font-weight:600; margin-bottom:12px">${side.charAt(0).toUpperCase() + side.slice(1)} Camera — Homography / Perspective</h4>
         <table class="data-table">
           <tr><th>Parameter</th><th>Value</th></tr>
           <tr><td>Output Size</td><td>${data.out_width} × ${data.out_height} px</td></tr>
           <tr><td>Scale</td><td>${data.scale_px_per_mm} px/mm</td></tr>
+          <tr><td>Method</td><td>${methodLabel}</td></tr>
+          ${data.num_points ? `<tr><td>Points Used</td><td>${data.inliers || '—'} / ${data.num_points} inliers</td></tr>` : ''}
+          ${data.reproj_error_mean_px !== undefined ? `<tr><td>Reprojection Error</td><td>mean: ${data.reproj_error_mean_px} px, max: ${data.reproj_error_max_px} px</td></tr>` : ''}
           <tr><td>Matrix Row 1</td><td class="text-mono">[${data.homography[0].map(v => v.toFixed(6)).join(', ')}]</td></tr>
           <tr><td>Matrix Row 2</td><td class="text-mono">[${data.homography[1].map(v => v.toFixed(6)).join(', ')}]</td></tr>
           <tr><td>Matrix Row 3</td><td class="text-mono">[${data.homography[2].map(v => v.toFixed(6)).join(', ')}]</td></tr>
@@ -288,5 +578,11 @@ const Calibration = (() => {
     }
   }
 
-  return { render, init, destroy, doStitchCalibration, clearStitch, doRuntimeCalibration, loadLensData, loadHomography };
+  return {
+    render, init, destroy,
+    doStitchCalibration, clearStitch,
+    doRuntimeCalibration,
+    loadLensData, loadHomography,
+    captureFrame, clearImages, runChessboardCalibration,
+  };
 })();

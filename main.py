@@ -279,28 +279,31 @@ class StableWidthFilter:
     def __init__(self, window_size=30, max_deviation_px=50):
         self.window = deque(maxlen=window_size)
         self.max_deviation_px = max_deviation_px
-        self.last_stable = 0.0
+        self.last_stable = None
 
     def update(self, raw_width_px):
         """Feed a new raw measurement. Returns the stabilised width."""
+        # First reading ever — accept unconditionally
+        if self.last_stable is None:
+            self.window.append(raw_width_px)
+            self.last_stable = raw_width_px
+            return self.last_stable
+
+        # Outlier rejection: only activate after we have enough samples
         if len(self.window) >= 5:
             median = np.median(self.window)
-            # Reject big jumps (outliers)
             if abs(raw_width_px - median) > self.max_deviation_px:
                 # Ignore this reading, return last stable value
                 return self.last_stable
 
         self.window.append(raw_width_px)
 
-        if len(self.window) == 0:
-            self.last_stable = raw_width_px
-        else:
-            # Average only the inliers (values within max_deviation of median)
-            arr = np.array(self.window)
-            median = np.median(arr)
-            mask = np.abs(arr - median) <= self.max_deviation_px
-            inliers = arr[mask]
-            self.last_stable = float(np.mean(inliers)) if len(inliers) > 0 else float(median)
+        # Average only the inliers (values within max_deviation of median)
+        arr = np.array(self.window)
+        median = np.median(arr)
+        mask = np.abs(arr - median) <= self.max_deviation_px
+        inliers = arr[mask]
+        self.last_stable = float(np.mean(inliers)) if len(inliers) > 0 else float(median)
 
         return self.last_stable
 
