@@ -17,6 +17,7 @@ os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
 import cv2
 import json
 import time
+import asyncio
 import base64
 import threading
 import numpy as np
@@ -418,7 +419,7 @@ async def stream_measurements():
     Server-Sent Events (SSE) stream of live measurements.
     Frontend can use EventSource to receive real-time updates.
     """
-    def event_generator():
+    async def event_generator():
         last_ts = 0.0
         while state.running:
             with state._measurement_lock:
@@ -426,7 +427,7 @@ async def stream_measurements():
             if m and m.timestamp != last_ts:
                 last_ts = m.timestamp
                 yield f"data: {m.model_dump_json()}\n\n"
-            time.sleep(0.1)  # 10 Hz SSE push rate
+            await asyncio.sleep(0.1)  # 10 Hz SSE push rate — non-blocking
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -487,7 +488,7 @@ async def stream_camera(
     if cam is None:
         raise HTTPException(status_code=503, detail=f"{side} camera not initialized")
 
-    def mjpeg_generator():
+    async def mjpeg_generator():
         while state.running:
             ret, frame = cam.read()
             if ret and frame is not None:
@@ -506,7 +507,7 @@ async def stream_camera(
                     b"--frame\r\n"
                     b"Content-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n"
                 )
-            time.sleep(0.05)
+            await asyncio.sleep(0.05)  # non-blocking
 
     return StreamingResponse(
         mjpeg_generator(),

@@ -280,6 +280,7 @@ class StableWidthFilter:
         self.window = deque(maxlen=window_size)
         self.max_deviation_px = max_deviation_px
         self.last_stable = None
+        self.consecutive_outliers = 0
 
     def update(self, raw_width_px):
         """Feed a new raw measurement. Returns the stabilised width."""
@@ -287,15 +288,27 @@ class StableWidthFilter:
         if self.last_stable is None:
             self.window.append(raw_width_px)
             self.last_stable = raw_width_px
+            self.consecutive_outliers = 0
             return self.last_stable
 
         # Outlier rejection: only activate after we have enough samples
         if len(self.window) >= 5:
             median = np.median(self.window)
             if abs(raw_width_px - median) > self.max_deviation_px:
-                # Ignore this reading, return last stable value
+                self.consecutive_outliers += 1
+                # If we've rejected too many in a row, the "truth" might have shifted.
+                # Reset the filter to accept the new reality.
+                if self.consecutive_outliers > 30:
+                    self.window.clear()
+                    self.window.append(raw_width_px)
+                    self.last_stable = raw_width_px
+                    self.consecutive_outliers = 0
+                    return self.last_stable
+                
+                # Otherwise, ignore this reading, return last stable value
                 return self.last_stable
 
+        self.consecutive_outliers = 0
         self.window.append(raw_width_px)
 
         # Average only the inliers (values within max_deviation of median)
