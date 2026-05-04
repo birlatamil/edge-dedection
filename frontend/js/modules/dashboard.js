@@ -85,6 +85,7 @@ const Dashboard = (() => {
       sseSource.close();
       sseSource = null;
     }
+    pollingActive = false;
   }
 
   function setupCanvas() {
@@ -106,37 +107,69 @@ const Dashboard = (() => {
 
   function startSSE() {
     const badge = document.getElementById('dash-connection-badge');
+    let sseFailCount = 0;
+    const MAX_SSE_FAILS = 3;
 
-    // Try SSE first, fall back to polling
-    try {
-      sseSource = new EventSource(API.measurementStreamUrl());
+    function trySSE() {
+      try {
+        if (sseSource) { sseSource.close(); sseSource = null; }
 
-      sseSource.onopen = () => {
-        if (badge) { badge.textContent = 'Live'; badge.className = 'card-badge success'; }
-      };
+        sseSource = new EventSource(API.measurementStreamUrl());
 
-      sseSource.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-        updateDisplay(data);
-      };
+        sseSource.onopen = () => {
+          sseFailCount = 0;
+          if (badge) { badge.textContent = 'Live'; badge.className = 'card-badge success'; }
+        };
 
-      sseSource.onerror = () => {
-        if (badge) { badge.textContent = 'Reconnecting...'; badge.className = 'card-badge warning'; }
-        // SSE will auto-reconnect
-      };
-    } catch {
-      // Fallback: polling
-      if (badge) { badge.textContent = 'Polling'; badge.className = 'card-badge'; }
-      pollMeasurement();
+        sseSource.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            updateDisplay(data);
+          } catch { /* bad JSON, skip */ }
+        };
+
+        sseSource.onerror = () => {
+          sseFailCount++;
+          if (sseSource) { sseSource.close(); sseSource = null; }
+
+          if (sseFailCount >= MAX_SSE_FAILS) {
+            // SSE is not working — switch to polling permanently
+            if (badge) { badge.textContent = 'Polling'; badge.className = 'card-badge'; }
+            startPolling();
+          } else {
+            // Retry SSE after a short delay
+            if (badge) { badge.textContent = 'Reconnecting...'; badge.className = 'card-badge warning'; }
+            setTimeout(trySSE, 2000);
+          }
+        };
+      } catch {
+        // SSE constructor failed — go straight to polling
+        if (badge) { badge.textContent = 'Polling'; badge.className = 'card-badge'; }
+        startPolling();
+      }
     }
+
+    trySSE();
   }
 
-  async function pollMeasurement() {
-    while (true) {
+  let pollingActive = false;
+
+  async function startPolling() {
+    if (pollingActive) return; // prevent duplicate loops
+    pollingActive = true;
+    const badge = document.getElementById('dash-connection-badge');
+
+    while (pollingActive) {
       try {
         const data = await API.measurement();
         updateDisplay(data);
-      } catch { /* ignore */ }
+        if (badge && badge.textContent !== 'Polling') {
+          badge.textContent = 'Polling';
+          badge.className = 'card-badge';
+        }
+      } catch {
+        if (badge) { badge.textContent = 'Offline'; badge.className = 'card-badge error'; }
+      }
       await new Promise(r => setTimeout(r, 200));
     }
   }

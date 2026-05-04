@@ -705,7 +705,73 @@ body {
 
 .aoi-field input:focus {
   border-color: var(--accent);
-  box-shadow: 0 0 0 2px var(--accent-subtle);
+}
+
+/* ── AOI Interactive Drawing ───────────────────────────────── */
+
+.aoi-cam-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-sm);
+}
+
+.aoi-cam-title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.aoi-preview-wrap {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  background: var(--bg-tertiary);
+  margin-bottom: var(--space-sm);
+}
+
+.aoi-preview-img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+  background: #1a1a1a;
+}
+
+.aoi-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  /* Only receives mouse events when drawing mode is active (set via JS cursor style) */
+}
+
+.aoi-canvas[style*="crosshair"] {
+  pointer-events: auto;
+}
+
+.aoi-instructions {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: rgba(42, 157, 143, 0.92);
+  color: white;
+  text-align: center;
+  font-size: 0.8rem;
+  font-weight: 500;
+  padding: var(--space-sm) var(--space-md);
+  transform: translateY(100%);
+  transition: transform 0.25s ease;
+}
+
+.aoi-instructions.visible {
+  transform: translateY(0);
 }
 
 /* ── Calibration Data Table ─────────────────────────────────── */
