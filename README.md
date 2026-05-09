@@ -99,6 +99,66 @@ python main.py --left-src rtsp://172.32.0.94:554/live/0 --right-src rtsp://172.3
 
 ---
 
+## 3.1 Luckfox Board Setup (CLI)
+
+Each Luckfox Pico board runs an RTSP camera server. Before the detection system can receive frames, the boards must be started with the correct pipeline commands.
+
+### Board IP Addresses
+
+| Board | IP Address | Role |
+|---|---|---|
+| **Left Camera** | `172.32.0.94` | Left edge of fabric |
+| **Right Camera** | `172.32.0.93` | Right edge of fabric |
+
+### SSH Into a Board
+
+```bash
+# Left camera board
+ssh root@172.32.0.94
+
+# Right camera board
+ssh root@172.32.0.93
+```
+
+### Start the Camera Pipeline
+
+Run these commands **on each board** after SSH-ing in:
+
+```bash
+# 1. Kill any stale processes from a previous session
+killall rkaiq_3A_server
+killall sample_demo_vi_venc
+killall sample_demo_vi
+
+# 2. Start the 3A ISP server (auto-exposure, auto-white-balance, auto-focus)
+rkaiq_3A_server &
+
+# 3. Wait for 3A server to initialise
+sleep 2
+
+# 4. Start the video encoder — outputs H.264 CBR stream at 1280×720
+sample_demo_vi_venc -w 1280 -h 720 -e h264cbr
+```
+
+> **Note:** These commands must be run on **both** boards (`172.32.0.94` and `172.32.0.93`). The RTSP stream will be available at `rtsp://<board-ip>:554/live/0` once the pipeline is running.
+
+### Quick One-Liner (per board)
+
+```bash
+# SSH and start pipeline in one go (left camera example)
+ssh root@172.32.0.94 "killall rkaiq_3A_server; killall sample_demo_vi_venc; killall sample_demo_vi; rkaiq_3A_server & sleep 2 && sample_demo_vi_venc -w 1280 -h 720 -e h264cbr"
+```
+
+### Stopping the Pipeline
+
+```bash
+# On the board, kill all camera processes
+killall sample_demo_vi_venc
+killall rkaiq_3A_server
+```
+
+---
+
 ## 4. Key Concepts
 
 | Concept | What It Is | Frontend Relevance |
