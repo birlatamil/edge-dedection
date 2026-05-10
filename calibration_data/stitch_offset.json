@@ -1,6 +1,6 @@
 {
-  "stitch_offset": 1240.0700000000002,
-  "calibrated_cloth_width_mm": 1279.0,
-  "left_edge_at_calibration": 710.07,
-  "right_edge_at_calibration": 749.0
+  "stitch_offset": 1259.1,
+  "calibrated_cloth_width_mm": 1455.0,
+  "left_edge_at_calibration": 746.12,
+  "right_edge_at_calibration": 942.02
 }
