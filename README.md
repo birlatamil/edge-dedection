@@ -456,6 +456,19 @@ graph TD
 
 > Steps 1–4 are **CLI-only** and require physical access to the cameras with a checkerboard pattern. Step 5 (stitch) can be triggered from the frontend via the API.
 
+### Full CLI Commands
+
+```bash
+# Step 1: Capture checkerboard images from both cameras
+python calibrate.py capture --left-src rtsp://172.32.0.94:554/live/0 --right-src rtsp://172.32.0.93:554/live/0
+
+# Step 4: Compute perspective homography using a known rectangle
+python calibrate.py perspective --rect-width-mm 170 --rect-height-mm 300
+
+# Run the main detection system with interactive AOI selection
+python main.py --left-src "rtsp://172.32.0.94:554/live/0" --right-src "rtsp://172.32.0.93:554/live/0" --aoi-mode interactive --cloth-width-mm 1655
+```
+
 ---
 
 ## 8. Frontend Integration Guide
