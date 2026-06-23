@@ -12,6 +12,7 @@ from collections import deque
 from concurrent.futures import ProcessPoolExecutor
 
 STITCH_OFFSET_FILE = "calibration_data/stitch_offset.json"
+AOI_FILE = "calibration_data/aoi.json"
 
 
 def load_stitch_offset():
@@ -122,6 +123,32 @@ class RTSPCamera:
 
 
 # ─── AOI Helpers ────────────────────────────────────────────────────────────────
+
+def load_aoi():
+    """Load saved AOI coordinates from aoi.json. Returns (left_aoi, right_aoi) or (None, None)."""
+    if os.path.exists(AOI_FILE):
+        with open(AOI_FILE, 'r') as f:
+            data = json.load(f)
+        left = data.get("left_aoi")
+        right = data.get("right_aoi")
+        left_aoi = tuple(left) if left is not None else None
+        right_aoi = tuple(right) if right is not None else None
+        print(f"[AOI] Loaded from {AOI_FILE}: left={left_aoi}, right={right_aoi}")
+        return left_aoi, right_aoi
+    return None, None
+
+
+def save_aoi(left_aoi, right_aoi):
+    """Save AOI coordinates to aoi.json for persistence across runs."""
+    os.makedirs(os.path.dirname(AOI_FILE), exist_ok=True)
+    data = {
+        "left_aoi": list(left_aoi) if left_aoi is not None else None,
+        "right_aoi": list(right_aoi) if right_aoi is not None else None,
+    }
+    with open(AOI_FILE, 'w') as f:
+        json.dump(data, f, indent=2)
+    print(f"[AOI] Saved to {AOI_FILE}: left={left_aoi}, right={right_aoi}")
+
 
 def select_aoi_interactive(frame, window_name="Select AOI"):
     """Let the user draw a rectangle on the frame to define the AOI."""
@@ -388,8 +415,8 @@ def main():
     print("Cameras initialized.")
 
     # ── Determine AOI for each camera ───────────────────────────────────────
-    left_aoi = None
-    right_aoi = None
+    # Try to load previously saved AOI first
+    left_aoi, right_aoi = load_aoi()
 
     if args.aoi_mode == 'interactive':
         _, first_left = left_cam.read()
@@ -400,6 +427,8 @@ def main():
         if first_right is not None:
             right_aoi = select_aoi_interactive(first_right, "Select AOI - Right Camera")
             print(f"Right AOI set to: {right_aoi}")
+        # Save the newly selected AOI so it persists across runs
+        save_aoi(left_aoi, right_aoi)
 
     elif args.aoi_mode == 'manual':
         if args.aoi_left:
@@ -408,6 +437,11 @@ def main():
         if args.aoi_right:
             right_aoi = parse_aoi_string(args.aoi_right)
             print(f"Right AOI (manual): {right_aoi}")
+        # Save manually specified AOI
+        save_aoi(left_aoi, right_aoi)
+
+    elif left_aoi is not None or right_aoi is not None:
+        print(f"[AOI] Using saved AOI  — press 'u' to update interactively.")
 
     # ── Create process pool ─────────────────────────────────────────────────
     executor = ProcessPoolExecutor(max_workers=args.workers)
@@ -449,6 +483,7 @@ def main():
 
     print("Press 'q' to quit. Press 'c' to clear custom guide lines.")
     print("Press 's' to calibrate stitch offset (requires --cloth-width-mm).")
+    print("Press 'u' to update AOI interactively and save to aoi.json.")
     print("Left-click on video to add a custom guide, Right-click to remove last guide.")
     cv2.namedWindow("Edge Detection - Left", cv2.WINDOW_NORMAL)
     cv2.setMouseCallback("Edge Detection - Left", mouse_callback, 'left')
@@ -573,6 +608,18 @@ def main():
             elif key == ord('c'):
                 custom_guides['left'].clear()
                 custom_guides['right'].clear()
+            elif key == ord('u'):
+                # Update AOI interactively and persist to aoi.json
+                print("\n[AOI] Updating AOI interactively...")
+                _, snap_left = left_cam.read()
+                _, snap_right = right_cam.read()
+                if snap_left is not None:
+                    left_aoi = select_aoi_interactive(snap_left, "Update AOI - Left Camera")
+                    print(f"[AOI] Left AOI updated to: {left_aoi}")
+                if snap_right is not None:
+                    right_aoi = select_aoi_interactive(snap_right, "Update AOI - Right Camera")
+                    print(f"[AOI] Right AOI updated to: {right_aoi}")
+                save_aoi(left_aoi, right_aoi)
             elif key == ord('s'):
                 # Stitch calibration: compute offset from known cloth width
                 if args.cloth_width_mm is not None and args.cloth_width_mm > 0:

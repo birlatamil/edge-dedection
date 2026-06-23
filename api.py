@@ -43,7 +43,10 @@ from main import (
     StableWidthFilter,
     load_stitch_offset,
     save_stitch_offset,
+    load_aoi,
+    save_aoi,
     STITCH_OFFSET_FILE,
+    AOI_FILE,
 )
 
 from calibrate import (
@@ -229,6 +232,11 @@ class AppState:
         if offset is not None:
             self.stitch_offset = offset
             self.stitch_calibrated = True
+
+        # Load saved AOI from aoi.json
+        left_aoi, right_aoi = load_aoi()
+        self.left_aoi = left_aoi
+        self.right_aoi = right_aoi
 
         self.running = True
 
@@ -544,6 +552,9 @@ async def update_aoi(req: AOIUpdateRequest):
     else:
         state.right_aoi = None
 
+    # Persist to aoi.json so it survives restarts
+    save_aoi(state.left_aoi, state.right_aoi)
+
     return {"message": "AOI updated", "left_aoi": req.left_aoi, "right_aoi": req.right_aoi}
 
 
@@ -552,6 +563,8 @@ async def clear_aoi():
     """Reset AOI to full frame for both cameras."""
     state.left_aoi = None
     state.right_aoi = None
+    # Persist the cleared state to aoi.json
+    save_aoi(None, None)
     return {"message": "AOI cleared for both cameras"}
 
 
