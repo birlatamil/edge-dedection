@@ -12,6 +12,7 @@ Run:
 """
 
 import os
+import sys
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
 
 import cv2
@@ -21,17 +22,18 @@ import asyncio
 import base64
 import threading
 import numpy as np
+import uvicorn
 
 from io import BytesIO
 from typing import Optional, Dict, Any, List
 from collections import deque
 from contextlib import asynccontextmanager
 from concurrent.futures import ProcessPoolExecutor
-
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
+from fastapi.staticfiles import StaticFiles
 
 # ─── Import core logic from main.py ────────────────────────────────────────────
 
@@ -81,6 +83,7 @@ class EdgeMeasurement(BaseModel):
     stitch_calibrated: bool
     stitch_offset: Optional[float] = None
     timestamp: float
+    width_cm : float
 
 
 class AOIConfig(BaseModel):
@@ -308,6 +311,7 @@ class AppState:
 
         stable_width_px = self.width_filter.update(raw_width_px)
         width_mm = stable_width_px * self.mm_per_px if self.mm_per_px else None
+        width_cm = round(width_mm / 10, 2) 
 
         return EdgeMeasurement(
             left_edge_px=round(left_edge_x, 2),
@@ -319,6 +323,7 @@ class AppState:
             stitch_calibrated=self.stitch_calibrated,
             stitch_offset=round(self.stitch_offset, 2) if self.stitch_offset else None,
             timestamp=time.time(),
+            width_cm=width_cm
         )
 
 
@@ -941,11 +946,36 @@ async def health():
     """Simple health-check endpoint for load balancers / monitoring."""
     return {"status": "ok", "timestamp": time.time()}
 
+# ═══════════════════════════════════════════════════════════════════════════════
+#   Frontend 
+# ═══════════════════════════════════════════════════════════════════════════════
+
+if getattr(sys, 'frozen', False):
+    base_dir = sys._MEIPASS 
+else:
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+
+# 2. Point to your "frontend" folder
+frontend_dir = os.path.join(base_dir, "frontend")
+
+# 3. Mount it so FastAPI serves your Vite index.html
+app.mount("/", StaticFiles(directory=frontend_dir, html=True), name="frontend")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Run
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# if __name__ == "__main__":
+#     import uvicorn
+#     uvicorn.run("api:app", host="0.0.0.0", port=8000, reload=False )
+
+
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("api:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(
+        app,                    # Pass the object directly, NOT the string "api:app"
+        host="0.0.0.0", 
+        port=8000, 
+        reload=False,
+        # access_log=False,       # Disables the "GET / HTTP/1.1 200 OK" traffic logs
+        # log_level="critical"    # Hides startup info and only shows critical crashes
+    )
