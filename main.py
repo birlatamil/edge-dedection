@@ -127,14 +127,18 @@ class RTSPCamera:
 def load_aoi():
     """Load saved AOI coordinates from aoi.json. Returns (left_aoi, right_aoi) or (None, None)."""
     if os.path.exists(AOI_FILE):
-        with open(AOI_FILE, 'r') as f:
-            data = json.load(f)
-        left = data.get("left_aoi")
-        right = data.get("right_aoi")
-        left_aoi = tuple(left) if left is not None else None
-        right_aoi = tuple(right) if right is not None else None
-        print(f"[AOI] Loaded from {AOI_FILE}: left={left_aoi}, right={right_aoi}")
-        return left_aoi, right_aoi
+        try:
+            with open(AOI_FILE, 'r') as f:
+                data = json.load(f)
+            left = data.get("left_aoi")
+            right = data.get("right_aoi")
+            left_aoi = tuple(left) if left is not None else None
+            right_aoi = tuple(right) if right is not None else None
+            print(f"[AOI] Loaded from {AOI_FILE}: left={left_aoi}, right={right_aoi}")
+            return left_aoi, right_aoi
+        except (json.JSONDecodeError, ValueError) as e:
+            print(f"[AOI] Warning: Could not parse {AOI_FILE}: {e}. Using full frame.")
+            return None, None
     return None, None
 
 
